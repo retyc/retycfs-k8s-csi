@@ -66,30 +66,34 @@ jobs:
       - name: retyc-cli version, Dockerfile vs chart
         run: .github/scripts/check-cli-version.sh
 
-      - name: Render in every credential and cache mode
+      - name: Render in every identity and cache mode
         run: |
-          helm template x charts/retycfs-csi --set credentials.token=t --set credentials.keyPassphrase=p > /tmp/managed.yaml
-          helm template x charts/retycfs-csi --set credentials.existingSecret=s > /tmp/existing.yaml
-          helm template x charts/retycfs-csi > /tmp/tenant-only.yaml
-          ! grep -q envFrom /tmp/tenant-only.yaml
-          helm template x charts/retycfs-csi --set credentials.existingSecret=s --set controller.replicas=3 > /tmp/ha.yaml
-          helm template x charts/retycfs-csi --set credentials.existingSecret=s \
+          org=0190a7f4-0000-7000-8000-000000000001
+          helm template x charts/retycfs-csi -n retycfs-system --set identity.organizationID=$org > /tmp/managed.yaml
+          helm template x charts/retycfs-csi -n retycfs-system > /tmp/tenant-only.yaml
+          helm template x charts/retycfs-csi --set identity.organizationID=$org --set controller.replicas=3 > /tmp/ha.yaml
+          helm template x charts/retycfs-csi --set identity.organizationID=$org \
             --set cache.store=redis --set cache.redis.subchart.enabled=true > /tmp/redis-subchart.yaml
-          helm template x charts/retycfs-csi --set credentials.existingSecret=s \
+          helm template x charts/retycfs-csi --set identity.organizationID=$org \
             --set cache.store=redis --set cache.redis.external.url=redis://default:p@redis:6379 > /tmp/redis-external.yaml
           # The Redis password never lands in the mount pods' ConfigMap.
-          ! helm template x charts/retycfs-csi --set credentials.existingSecret=s --set cache.store=redis \
+          ! helm template x charts/retycfs-csi --set identity.organizationID=$org --set cache.store=redis \
             --set cache.redis.external.url=redis://default:p@redis:6379 \
             --show-only templates/mount-config.yaml | grep -q 'redis://'
+          # The driver no longer has --require-identity: an unknown flag would stop it.
+          ! grep -q -- --require-identity /tmp/managed.yaml /tmp/tenant-only.yaml
+          # The removed token identity fails loudly.
+          ! helm template x charts/retycfs-csi --set credentials.existingSecret=s >/dev/null 2>&1
 
       # Validate the rendered manifests against the Kubernetes API schemas, for the oldest and
-      # the newest version the chart claims to support (Chart.yaml kubeVersion).
+      # the newest version the chart claims to support (Chart.yaml kubeVersion). kubeconform has no
+      # schema for CustomResourceDefinition: the API server validates the RetycIdentity CRD.
       - name: kubeconform
         run: |
           for v in 1.34.0 1.36.0; do
-            for f in /tmp/managed.yaml /tmp/ha.yaml /tmp/redis-subchart.yaml; do
+            for f in /tmp/managed.yaml /tmp/tenant-only.yaml /tmp/ha.yaml /tmp/redis-subchart.yaml; do
               docker run --rm -i ghcr.io/yannh/kubeconform:v0.8.0 \
-                -strict -summary -kubernetes-version "$v" < "$f"
+                -strict -summary -skip CustomResourceDefinition -kubernetes-version "$v" < "$f"
             done
           done
 

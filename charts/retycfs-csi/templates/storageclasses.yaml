@@ -1,7 +1,9 @@
-{{- /* A class without tenantSecretName needs the cluster-wide identity: skipped without one (NOTES). */ -}}
-{{- $global := include "retycfs-csi.credentialsSecretName" . }}
+{{- /* A class without `tenant` needs the cluster-wide identity: skipped without one (NOTES). */ -}}
+{{- include "retycfs-csi.validate" . }}
+{{- $classes := include "retycfs-csi.storageClassNames" . | fromJsonArray }}
+{{- $secret := printf "%s-${pvc.namespace}" (include "retycfs-csi.identitySecretName" .) }}
 {{- range .Values.storageClasses }}
-{{- if or .tenantSecretName $global }}
+{{- if has .name $classes }}
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -20,15 +22,17 @@ provisioner: {{ include "retycfs-csi.driverName" $ }}
 reclaimPolicy: {{ .reclaimPolicy | default "Delete" }}
 allowVolumeExpansion: true
 volumeBindingMode: {{ .volumeBindingMode | default "Immediate" }}
-{{- if .tenantSecretName }}
+{{- if .tenant }}
+# The claim namespace's identity, enrolled from its RetycIdentity: a Secret of the driver's
+# namespace, which tenants cannot read.
 parameters:
-  csi.storage.k8s.io/provisioner-secret-name: {{ .tenantSecretName | quote }}
-  csi.storage.k8s.io/provisioner-secret-namespace: ${pvc.namespace}
-  csi.storage.k8s.io/node-stage-secret-name: {{ .tenantSecretName | quote }}
-  csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}
+  csi.storage.k8s.io/provisioner-secret-name: {{ $secret | quote }}
+  csi.storage.k8s.io/provisioner-secret-namespace: {{ $.Release.Namespace }}
+  csi.storage.k8s.io/node-stage-secret-name: {{ $secret | quote }}
+  csi.storage.k8s.io/node-stage-secret-namespace: {{ $.Release.Namespace }}
   # csi-resizer: ControllerExpandVolume, and ControllerModifyVolume which reuses this secret.
-  csi.storage.k8s.io/controller-expand-secret-name: {{ .tenantSecretName | quote }}
-  csi.storage.k8s.io/controller-expand-secret-namespace: ${pvc.namespace}
+  csi.storage.k8s.io/controller-expand-secret-name: {{ $secret | quote }}
+  csi.storage.k8s.io/controller-expand-secret-namespace: {{ $.Release.Namespace }}
 {{- end }}
 {{- end }}
 {{- end }}

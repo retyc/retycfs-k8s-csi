@@ -58,8 +58,12 @@ const (
 	defaultRestartBackoff    = 5 * time.Second
 	defaultMaxRestartBackoff = 5 * time.Minute
 	defaultStableAfter       = time.Minute
-	defaultMaxFatalExits     = 3
-	readyTimeout             = 2 * time.Second
+	// defaultMaxFatalExits gives up at the first 77 or 78: the CLI exits 77 only once the machine is
+	// refused for good (at once by the token endpoint, after a minute of 401 from the API) and 78 on
+	// a configuration no retry fixes: a new pod with the same identity would only fail again. A 77
+	// is not final though (see GiveUpRetryAfter).
+	defaultMaxFatalExits = 1
+	readyTimeout         = 2 * time.Second
 )
 
 // DefaultResources are the mount container's resources when Config.Resources is empty: Burstable,
@@ -73,8 +77,14 @@ func DefaultResources() corev1.ResourceRequirements {
 	}
 }
 
+// GiveUpRetryAfter is how long a give-up on a 77 lasts, from the exit that caused it: the admin may
+// enable the machine again with the same keys, so the volume is tried once more then, and gives up
+// for as long again if refused still. Kubelet's retries do not extend it. A 78 never expires.
+const GiveUpRetryAfter = 15 * time.Minute
+
 // ErrGaveUp is returned by Ensure once a volume's pods exited MaxFatalExits times in a row with a
-// code saying the credentials are unusable: only new credentials (another config hash) help.
+// code saying the credentials are unusable: only new credentials (another config hash), or the
+// exited pod deleted by hand (a machine enabled again keeps its keys, so its hash), start over.
 var ErrGaveUp = errors.New("mount pod gave up")
 
 // ErrInvalidSpec is returned by Ensure for a Spec no pod can be built from: retrying is no use.
@@ -112,7 +122,7 @@ type Config struct {
 
 	// Restart policy: the delay starts at RestartBackoff (5 s) and
 	// doubles with every consecutive failure up to MaxRestartBackoff (5 min); a pod that ran for
-	// StableAfter (1 min) restarts after RestartBackoff again; MaxFatalExits (3) consecutive 77/78
+	// StableAfter (1 min) restarts after RestartBackoff again; MaxFatalExits (1) consecutive 77/78
 	// exits give up.
 	RestartBackoff    time.Duration
 	MaxRestartBackoff time.Duration
@@ -597,11 +607,18 @@ func (m *Manager) SpecOf(ctx context.Context, st State, cache Cache) (*Spec, err
 	return &Spec{
 		VolumeID: st.VolumeID, NodeName: st.NodeName, PVCName: st.PVCName, PVCNamespace: st.PVCNamespace,
 		StagingPath: st.StagingPath,
-		Credentials: identity.Credentials{
-			Token: string(secret.Data[identity.TokenKey]), Passphrase: string(secret.Data[identity.PassphraseKey]),
-		},
-		Cache: cache, UID: stored.UID, GID: stored.GID, Options: stored.Options, Resources: stored.Resources,
+		Credentials: credentialsOf(secret),
+		Cache:       cache, UID: stored.UID, GID: stored.GID, Options: stored.Options, Resources: stored.Resources,
 	}, nil
+}
+
+// credentialsOf reads the identity files back from a pod's Secret (see buildSecret).
+func credentialsOf(secret *corev1.Secret) identity.Credentials {
+	if c := identity.FromData(secret.Data); c != nil {
+		return *c
+	}
+
+	return identity.Credentials{}
 }
 
 // RemoveFinalizer removes FinalizerInUse from a pod. The JSON patch tests the current list, so a
@@ -775,7 +792,15 @@ func (m *Manager) finished(pod *corev1.Pod) bool {
 }
 
 func gaveUpError(name string, b Backoff) error {
-	return fmt.Errorf("%w: %s exited %d times in a row, last with code %d (%s); fix the credentials",
+	if !b.GiveUpUntil.IsZero() {
+		return fmt.Errorf("%w: %s exited %d times in a row, last with code %d (%s); once the machine is enabled "+
+			"again (or with new credentials), the mount is tried again automatically within %s, at %s at the latest",
+			ErrGaveUp, name, b.FatalExits, b.LastExitCode, ExitMeaning(b.LastExitCode), GiveUpRetryAfter,
+			b.GiveUpUntil.UTC().Format(time.RFC3339))
+	}
+
+	return fmt.Errorf("%w: %s exited %d times in a row, last with code %d (%s); fix the configuration (a changed "+
+		"one is used at the next stage), then delete the pod using the volume or unstage it to try again",
 		ErrGaveUp, name, b.FatalExits, b.LastExitCode, ExitMeaning(b.LastExitCode))
 }
 

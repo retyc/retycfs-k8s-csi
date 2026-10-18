@@ -244,8 +244,8 @@ func newNodeEnvWith(t *testing.T, configure func(*mountpod.Config)) *nodeEnv {
 	})}
 	e.s = &NodeServer{
 		NodeID: testNode, Mounter: e.mnt, Pods: pods, Kube: e.kube, Events: e.events,
-		DefaultCredentials: &identity.Credentials{Token: "default-tok", Passphrase: "default-pass"},
-		MountInfo:          e.mnt.list, Metrics: NewNodeMetrics(),
+		IdentityDir: identityDir(t, machineSecrets("default-key")),
+		MountInfo:   e.mnt.list, Metrics: NewNodeMetrics(),
 	}
 	pods.Prepare = e.s.Prepare
 
@@ -501,7 +501,7 @@ func TestNodeStageConfigAndReadiness(t *testing.T) {
 		AnnotationBackgroundDelete: "true", AnnotationLocalFile: "*.tmp  .~lock*",
 		AnnotationMountMemoryLimit: "1Gi", AnnotationMountCPURequest: "200m",
 	})
-	tenant := map[string]string{identity.TokenKey: "tenant-tok", identity.PassphraseKey: "tenant-pass"}
+	tenant := machineSecrets("tenant-key")
 
 	if c := e.stage(e.stageRequest(tenant)); c != codes.Aborted {
 		t.Fatalf("stage of a new volume = %v, want Aborted", c)
@@ -528,8 +528,8 @@ func TestNodeStageConfigAndReadiness(t *testing.T) {
 	}
 	secret, err := e.kube.CoreV1().Secrets(testNS).Get(context.Background(),
 		pod.Annotations[mountpod.AnnotationSecret], metav1.GetOptions{})
-	if err != nil || string(secret.Data[identity.TokenKey]) != "tenant-tok" {
-		t.Fatalf("secret = %v, %v; want the tenant's token", secret, err)
+	if err != nil || string(secret.Data[identity.ClientKeyFile]) != "tenant-key" {
+		t.Fatalf("secret = %v, %v; want the tenant's identity", secret, err)
 	}
 
 	// Running, but /readyz not 200 yet: still Aborted, and nothing bound.
@@ -580,7 +580,7 @@ func TestNodeStageStaticPV(t *testing.T) {
 	}
 	secret, _ := e2.kube.CoreV1().Secrets(testNS).Get(context.Background(),
 		pod.Annotations[mountpod.AnnotationSecret], metav1.GetOptions{})
-	if string(secret.Data[identity.TokenKey]) != "default-tok" {
+	if string(secret.Data[identity.ClientKeyFile]) != "default-key" {
 		t.Fatal("the static PV is not mounted with the default identity")
 	}
 }
@@ -638,21 +638,12 @@ func TestNodeStageGivesUp(t *testing.T) {
 	if c := e.stage(e.stageRequest(nil)); c != codes.Aborted {
 		t.Fatalf("first stage = %v, want Aborted", c)
 	}
-	for i := range 2 {
-		e.exit(77, "authentication required: token revoked")
-		if c := e.stage(e.stageRequest(nil)); c != codes.Aborted {
-			t.Fatalf("stage after exit %d = %v, want Aborted (backoff)", i+1, c)
-		}
-		e.advance(10 * time.Minute)
-		if c := e.stage(e.stageRequest(nil)); c != codes.Aborted {
-			t.Fatalf("stage after the backoff %d = %v, want Aborted (new pod)", i+1, c)
-		}
-	}
-	e.exit(77, "authentication required: token revoked")
+	// A machine refused is not retried: the first exit 77 gives up.
+	e.exit(77, "machine account refused: disabled")
 	if c := e.stage(e.stageRequest(nil)); c != codes.FailedPrecondition {
-		t.Fatalf("stage after 3 fatal exits = %v, want FailedPrecondition", c)
+		t.Fatalf("stage after a fatal exit = %v, want FailedPrecondition", c)
 	}
-	if !e.hasEvent(reasonMountGaveUp, "token revoked") {
+	if !e.hasEvent(reasonMountGaveUp, "machine account refused") {
 		t.Fatal("no MountGaveUp event with the exit message")
 	}
 }
@@ -919,9 +910,9 @@ func TestNodeStageGaveUpReleased(t *testing.T) {
 		t.Fatalf("after the sweep: pod gone %t, %d secrets; want the pod and its secret released", e.podGone(),
 			secrets())
 	}
-	for i := range 10 { // 20 minutes of kubelet retries, with the recovery in between
+	for i := range 5 { // 10 minutes of kubelet retries (a 77 is tried again after 15), with the recovery in between
 		_, err := e.s.NodeStageVolume(context.Background(), e.stageRequest(nil))
-		if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "token revoked") {
+		if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "machine refused") {
 			t.Fatalf("retry %d = %v, want FailedPrecondition with the last output", i, err)
 		}
 		e.advance(2 * time.Minute)
@@ -950,30 +941,24 @@ func TestNodeStageGaveUpReleased(t *testing.T) {
 	e2.claim(map[string]string{AnnotationUID: "1000"})
 	e2.giveUp()
 	e2.s.Recover(context.Background())
-	tenant := map[string]string{identity.TokenKey: "new-tok", identity.PassphraseKey: "pass"}
+	tenant := machineSecrets("new-key")
 	if c := e2.stage(e2.stageRequest(tenant)); c != codes.Aborted || e2.podGone() {
 		t.Fatalf("stage with new credentials = %v, want Aborted with a new pod", c)
 	}
 }
 
-// giveUp makes the volume's mount pods give up during kubelet's stages (exit 77 three times).
+// giveUp makes the volume's mount pod give up during kubelet's stages: one exit 77 is enough.
 func (e *nodeEnv) giveUp() {
 	e.t.Helper()
 	e.stage(e.stageRequest(nil))
-	for range 2 {
-		e.exit(77, "token revoked")
-		e.stage(e.stageRequest(nil))
-		e.advance(10 * time.Minute)
-		e.stage(e.stageRequest(nil))
-	}
-	e.exit(77, "token revoked")
+	e.exit(77, "machine refused")
 	if c := e.stage(e.stageRequest(nil)); c != codes.FailedPrecondition {
-		e.t.Fatalf("stage after 3 fatal exits = %v, want FailedPrecondition", c)
+		e.t.Fatalf("stage after a fatal exit = %v, want FailedPrecondition", c)
 	}
 }
 
 // The ways out of a give-up besides new credentials: the exited pod deleted by hand, an explicit
-// unstage, the volume gone from the node. Each starts a new series of tries.
+// unstage, the volume gone from the node. Each allows a new try.
 func TestNodeGaveUpWaysOut(t *testing.T) {
 	t.Run("pod deleted by hand", func(t *testing.T) {
 		e := newNodeEnv(t)
@@ -989,20 +974,13 @@ func TestNodeGaveUpWaysOut(t *testing.T) {
 		if c := e.stage(e.stageRequest(nil)); c != codes.Aborted || e.podGone() || e.pod().UID == old {
 			t.Fatalf("stage after the deletion = %v, want Aborted with a new pod", c)
 		}
-		// A full series again, and a new give-up is reported.
-		for i := range 2 {
-			e.exit(77, "token revoked again")
-			if c := e.stage(e.stageRequest(nil)); c != codes.Aborted {
-				t.Fatalf("stage after exit %d of the new series = %v, want Aborted (backoff)", i+1, c)
-			}
-			e.advance(10 * time.Minute)
-			e.stage(e.stageRequest(nil))
-		}
-		e.exit(77, "token revoked again")
+		// A new try (the machine enabled again keeps its keys, so the same config), and a new
+		// give-up is reported.
+		e.exit(77, "machine refused again")
 		if c := e.stage(e.stageRequest(nil)); c != codes.FailedPrecondition {
-			t.Fatalf("stage after 3 more fatal exits = %v, want FailedPrecondition", c)
+			t.Fatalf("stage after a new fatal exit = %v, want FailedPrecondition", c)
 		}
-		if !e.hasEvent(reasonMountGaveUp, "token revoked again") {
+		if !e.hasEvent(reasonMountGaveUp, "machine refused again") {
 			t.Fatal("the new give-up was not reported")
 		}
 	})
@@ -1156,5 +1134,31 @@ func TestReportExitDuringStage(t *testing.T) {
 	}
 	if n := strings.Count(strings.Join(e.eventList(), "\n"), reasonMountFailed); n != 0 {
 		t.Fatalf("%d more MountFailed events at the release, want none", n)
+	}
+}
+
+// A give-up on a 77 lasts mountpod.GiveUpRetryAfter, whatever kubelet's retries: then one new
+// stage creates a pod (the machine may be enabled again); refused again, it waits as long again.
+func TestNodeStageGaveUpOn77Expires(t *testing.T) {
+	e := newNodeEnv(t)
+	e.claim(map[string]string{AnnotationUID: "1000"})
+	e.giveUp()
+	e.s.Recover(context.Background()) // the sweep releases the exited pod
+	for range 6 {
+		e.advance(2 * time.Minute)
+		if c := e.stage(e.stageRequest(nil)); c != codes.FailedPrecondition {
+			t.Fatalf("stage before the expiry = %v, want FailedPrecondition", c)
+		}
+	}
+	e.advance(4 * time.Minute) // 16 minutes since the exit
+	if c := e.stage(e.stageRequest(nil)); c != codes.Aborted || e.podGone() {
+		t.Fatalf("stage after the expiry = %v, want Aborted with a new pod", c)
+	}
+	e.exit(77, "machine refused")
+	for range 3 {
+		if c := e.stage(e.stageRequest(nil)); c != codes.FailedPrecondition {
+			t.Fatalf("stage after the second 77 = %v, want FailedPrecondition", c)
+		}
+		e.advance(2 * time.Minute)
 	}
 }

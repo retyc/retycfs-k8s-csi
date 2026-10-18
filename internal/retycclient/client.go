@@ -1,6 +1,6 @@
 // Package retycclient wraps the `retyc` CLI binary as the CSI driver's only way to talk to the
 // Retyc API. Dataroom creation is entangled with the CLI's AGE key/crypto stack (GetActiveKey,
-// passphrase unlock) — that logic lives in retyc-cli's internal/service package, which this
+// rekeys) — that logic lives in retyc-cli's internal/service package, which this
 // module cannot import (Go internal-package visibility), and is not something to reimplement
 // against the raw HTTP API. Every call passes --json; retyc-cli prints a stable typed JSON
 // payload on stdout on success and a JSON error object on stderr on failure (non-zero exit):
@@ -10,35 +10,54 @@
 package retycclient
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/retyc/retycfs-k8s-csi/internal/identity"
+	"os"
 	"os/exec"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/retyc/retycfs-k8s-csi/internal/identity"
 )
 
-// Client execs a retyc binary with a fixed environment applied to every invocation.
+// Client execs a retyc binary as one machine account, with a fixed environment applied to every
+// invocation.
 type Client struct {
 	// BinPath is the path to the retyc binary.
 	BinPath string
-	// Env is the complete environment of the subprocess (it replaces, not appends to, the
-	// parent's environment — exec.Cmd semantics). It must carry RETYC_TOKEN and
-	// RETYC_KEY_PASSPHRASE; nil means "inherit the parent process environment".
+	// Env is the base environment of the subprocess; nil means the parent process environment.
+	// The variables of another identity (see identityEnv) are removed from it, and
+	// RETYC_MACHINE_DIR is set when Identity is.
 	Env []string
-	// Timeout bounds every invocation. Zero means no timeout.
+	// Identity is the machine account the subprocess runs as: its files are written to a private
+	// directory for each invocation, removed once it exits. Nil runs without an identity (machine
+	// enroll).
+	Identity *identity.Credentials
+	// TempDir is where those directories are created; "" means os.TempDir().
+	TempDir string
+	// Timeout bounds every invocation but Enroll. Zero means no timeout.
 	Timeout time.Duration
 }
 
-// New returns a Client that execs binPath with env applied on every call.
+// New returns a Client that execs binPath with env applied on every call, without an identity
+// (see WithIdentity).
 func New(binPath string, env []string) *Client {
 	return &Client{BinPath: binPath, Env: env, Timeout: 60 * time.Second}
+}
+
+// WithIdentity returns a copy of c whose subprocesses run as creds. c itself is unchanged.
+func (c *Client) WithIdentity(creds *identity.Credentials) *Client {
+	clone := *c
+	clone.Identity = creds
+
+	return &clone
 }
 
 // Error is returned when the retyc CLI exits non-zero. Message is the "error" of the JSON object
@@ -55,10 +74,53 @@ type Error struct {
 	Status int
 	// Detail is the API's own wording of a refusal: informative only, it may change.
 	Detail string
+	// ExitCode is the CLI's exit code, -1 when it did not exit on its own (killed, not started).
+	ExitCode int
 }
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("retyc %s: %s", strings.Join(e.Args, " "), e.Message)
+}
+
+// Exit codes of the CLI that say retrying cannot help (sysexits.h, a stable contract of retyc-cli).
+const (
+	// ExitMachineRefused (77, EX_NOPERM): the machine account is disabled or deleted.
+	ExitMachineRefused = 77
+	// ExitConfig (78, EX_CONFIG): the configuration is refused (machine files, their modes, the AGE
+	// key not the account's active one, a token variable alongside the machine account) or, for
+	// machine enroll, the request was denied.
+	ExitConfig = 78
+)
+
+// Sentinels matched by errors.Is on an *Error.
+var (
+	// ErrMachineRefused: the Retyc side refuses the machine account, disabled or deleted (exit
+	// code 77, or kind auth_required/unauthenticated). Disabling is reversible, with the same keys.
+	ErrMachineRefused = errors.New("machine account refused by Retyc (disabled or deleted)")
+	// ErrConfig: the configuration of the machine account is refused (exit code 78, kind config).
+	ErrConfig = errors.New("machine account configuration refused")
+	// ErrEnrollmentExpired: the enrollment request expired unanswered; enrolling again in the same
+	// directory reuses its keys.
+	ErrEnrollmentExpired = errors.New("machine enrollment expired")
+	// ErrEnrollmentDenied: an administrator denied the enrollment request.
+	ErrEnrollmentDenied = errors.New("machine enrollment denied")
+)
+
+// Is matches the sentinels above, from the kind of the error and its exit code.
+func (e *Error) Is(target error) bool {
+	switch target {
+	case ErrEnrollmentDenied:
+		return e.Kind == KindEnrollmentDenied
+	case ErrEnrollmentExpired:
+		return e.Kind == KindEnrollmentExpired
+	case ErrMachineRefused:
+		return e.ExitCode == ExitMachineRefused || e.Kind == KindAuthRequired || e.Kind == KindUnauthenticated
+	case ErrConfig:
+		// A denied enrollment exits 78 too, but is told apart by its kind.
+		return e.Kind == KindConfig || (e.ExitCode == ExitConfig && e.Kind != KindEnrollmentDenied)
+	}
+
+	return false
 }
 
 // The kinds of the CLI's JSON errors this driver tells apart (doc/commands.md of retyc-cli, "Errors
@@ -79,6 +141,10 @@ const (
 	KindGone             = "gone"
 	KindInvalid          = "invalid"
 	KindCLITooOld        = "cli_too_old"
+	KindConflict         = "conflict"
+	// The refusals of machine enroll.
+	KindEnrollmentExpired = "enrollment_expired"
+	KindEnrollmentDenied  = "enrollment_denied"
 )
 
 // classify returns the kind of a CLI error and its lowercased message, false when err is not one.
@@ -173,15 +239,16 @@ func IsNotFound(err error) bool {
 	return ok && notFoundError.MatchString(msg)
 }
 
-// IsUnauthenticated reports whether the login was refused: no stored token or a rejected refresh
-// token (auth_required, exit code 77), or the API answering 401 (unauthenticated). Kind only.
-func IsUnauthenticated(err error) bool {
-	return hasKind(err, KindAuthRequired, KindUnauthenticated)
-}
+// IsMachineRefused reports whether the machine account is refused, disabled or deleted (exit code
+// 77): see ErrMachineRefused.
+func IsMachineRefused(err error) bool { return errors.Is(err, ErrMachineRefused) }
 
-// IsConfig reports whether the key passphrase is missing or wrong, or the environment file refused
-// (config, exit code 78). Kind only.
-func IsConfig(err error) bool { return hasKind(err, KindConfig) }
+// IsConfig reports whether the machine account's configuration is refused (exit code 78): see
+// ErrConfig.
+func IsConfig(err error) bool { return errors.Is(err, ErrConfig) }
+
+// IsConflict reports whether the API answered 409 (conflict). Kind only.
+func IsConflict(err error) bool { return hasKind(err, KindConflict) }
 
 // IsForbidden reports whether the API answered 403 (a viewer, a dataroom over its plan). Kind only.
 func IsForbidden(err error) bool { return hasKind(err, KindForbidden) }
@@ -278,25 +345,9 @@ func (c *Client) run(ctx context.Context, out any, args ...string) error {
 		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
 		defer cancel()
 	}
-
-	fullArgs := append([]string{"--json"}, args...)
-	//nolint:gosec // G204: BinPath and args are controller-configured, not user input
-	cmd := exec.CommandContext(ctx, c.BinPath, fullArgs...)
-	cmd.Env = c.Env
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		payload := parseStderrError(stderr.Bytes())
-		if payload.Error == "" {
-			payload.Error = err.Error()
-		}
-
-		return &Error{
-			Args: args, Message: payload.Error, Kind: payload.Kind, Status: payload.Status, Detail: payload.Detail,
-		}
+	var stdout bytes.Buffer
+	if err := c.exec(ctx, &stdout, args...); err != nil {
+		return err
 	}
 
 	if out == nil {
@@ -308,6 +359,89 @@ func (c *Client) run(ctx context.Context, out any, args ...string) error {
 	}
 
 	return nil
+}
+
+// exec runs `retyc --json <args...>` as c.Identity, stdout to stdout, and returns an *Error when the
+// CLI fails. The identity's files are written to a fresh 0700 directory removed once it exits: no
+// two calls share one, and nothing of a key is ever logged.
+func (c *Client) exec(ctx context.Context, stdout *bytes.Buffer, args ...string) error {
+	env, cleanup, err := c.environ()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	fullArgs := append([]string{"--json"}, args...)
+	//nolint:gosec // G204: BinPath and args are controller-configured, not user input
+	cmd := exec.CommandContext(ctx, c.BinPath, fullArgs...)
+	cmd.Env = env
+
+	var stderr bytes.Buffer
+	cmd.Stdout = stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return cliError(args, err, stderr.Bytes())
+	}
+
+	return nil
+}
+
+// cliError builds the *Error of a failed run from its stderr and exit status.
+func cliError(args []string, runErr error, stderr []byte) *Error {
+	payload := parseStderrError(stderr)
+	if payload.Error == "" {
+		payload.Error = runErr.Error()
+	}
+	code := -1
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		code = exitErr.ExitCode()
+	}
+
+	return &Error{
+		Args: args, Message: payload.Error, Kind: payload.Kind, Status: payload.Status, Detail: payload.Detail,
+		ExitCode: code,
+	}
+}
+
+// identityEnv are the variables that select an identity of the CLI. They are removed from the base
+// environment: RETYC_TOKEN or RETYC_KEY_PASSPHRASE alongside a machine account is refused (78), and
+// the others would override the files of c.Identity.
+var identityEnv = []string{
+	"RETYC_TOKEN", "RETYC_KEY_PASSPHRASE", identity.MachineDirKey,
+	"RETYC_CLIENT_ID", "RETYC_TOKEN_ENDPOINT", "RETYC_CLIENT_KEY_FILE", "RETYC_AGE_KEY_FILE",
+	// A file of variables the CLI would load in their place.
+	"RETYC_ENV_FILE",
+}
+
+// environ returns the environment of a subprocess and the function that removes its identity
+// directory.
+func (c *Client) environ() ([]string, func(), error) {
+	base := c.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	env := slices.DeleteFunc(slices.Clone(base), func(kv string) bool {
+		k, _, _ := strings.Cut(kv, "=")
+
+		return slices.Contains(identityEnv, k)
+	})
+	if c.Identity == nil {
+		return env, func() {}, nil
+	}
+	dir, err := os.MkdirTemp(c.TempDir, "retyc-machine-") // 0700
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating the identity directory: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) } //nolint:gosec // G703: the directory MkdirTemp just created
+	if err := c.Identity.Materialize(dir); err != nil {
+		cleanup()
+
+		return nil, nil, err
+	}
+
+	return append(env, identity.MachineDirKey+"="+dir), cleanup, nil
 }
 
 // DataroomCreateResult mirrors retyc's dataroomCreateJSON (cmd/dataroom.go).
@@ -462,15 +596,6 @@ func (q *UserQuota) HasDataroomQuota() bool {
 	return q.MaxCountDataroom == nil || q.CountDataroom < *q.MaxCountDataroom
 }
 
-// WithEnv returns a copy of c whose subprocesses see overrides applied on top of c's environment
-// (per-tenant credentials from CSI secrets). c itself is unchanged.
-func (c *Client) WithEnv(overrides map[string]string) *Client {
-	clone := *c
-	clone.Env = identity.MergeEnv(c.Env, overrides)
-
-	return &clone
-}
-
 // AuthStatus mirrors retyc's authStatusJSON (cmd/output.go).
 type AuthStatus struct {
 	Authenticated bool   `json:"authenticated"`
@@ -478,17 +603,127 @@ type AuthStatus struct {
 	Reason        string `json:"reason,omitempty"`
 }
 
-// AuthStatusCheck runs `retyc --json auth status`, which validates the configured token against
-// the auth server (refreshing it if needed), and fails when the account is not authenticated.
-// Note the CLI exits 0 either way — the verdict is in the JSON.
+// reasonMachineRevoked is the reason of `auth status` for a machine account refused.
+const reasonMachineRevoked = "machine_revoked"
+
+// AuthStatusCheck runs `retyc --json auth status`, which obtains a token for the machine account
+// and checks that its AGE key is the account's active one, and fails when it is not authenticated:
+// a machine refused (reason machine_revoked) wraps ErrMachineRefused. The CLI exits 0 either way:
+// the verdict is in the JSON.
 func (c *Client) AuthStatusCheck(ctx context.Context) error {
 	var st AuthStatus
 	if err := c.run(ctx, &st, "auth", "status"); err != nil {
 		return err
+	}
+	if st.Reason == reasonMachineRevoked {
+		return fmt.Errorf("retyc not authenticated: %w", ErrMachineRefused)
 	}
 	if !st.Authenticated {
 		return fmt.Errorf("retyc not authenticated: %s", st.Reason)
 	}
 
 	return nil
+}
+
+// Roles of a dataroom member (`dataroom user add --role`).
+const (
+	RoleViewer = "viewer"
+	RoleEditor = "editor"
+	RoleAdmin  = "admin"
+)
+
+// AddMember adds email to dataroom id with role, and rekeys the dataroom for it. The positional
+// arguments follow "--", so that an e-mail starting with "-" is never taken for a flag.
+func (c *Client) AddMember(ctx context.Context, dataroomID, email, role string) error {
+	return c.run(ctx, nil, "dataroom", "user", "add", "--role", role, "--", dataroomID, email)
+}
+
+// Events of `machine enroll --json`, one JSON object per line on stdout.
+const (
+	EnrollPending  = "pending"
+	EnrollApproved = "approved"
+	EnrollDenied   = "denied"
+	EnrollExpired  = "expired"
+)
+
+// EnrollEvent is one line of `machine enroll --json`. Only Event is always set: the other fields
+// belong to the events that carry them.
+type EnrollEvent struct {
+	Event          string    `json:"event"`
+	EnrollmentID   string    `json:"enrollment_id,omitempty"`
+	Fingerprint    string    `json:"fingerprint,omitempty"`
+	ApprovalURI    string    `json:"approval_uri,omitempty"`
+	ExpiresAt      time.Time `json:"expires_at,omitzero"`
+	MachineID      string    `json:"machine_id,omitempty"`
+	OrganizationID string    `json:"organization_id,omitempty"`
+	ClientID       string    `json:"client_id,omitempty"`
+}
+
+// ParseEnrollEvent decodes one line of `machine enroll --json`. A line without an event is an
+// error; an unknown event is returned as is, for the caller to ignore.
+func ParseEnrollEvent(line []byte) (EnrollEvent, error) {
+	var ev EnrollEvent
+	if err := json.Unmarshal(bytes.TrimSpace(line), &ev); err != nil {
+		return EnrollEvent{}, fmt.Errorf("decoding a machine enroll event: %w", err)
+	}
+	if ev.Event == "" {
+		return EnrollEvent{}, errors.New("decoding a machine enroll event: no event")
+	}
+
+	return ev, nil
+}
+
+// EnrollParams are the arguments of `machine enroll`. Name and ClusterUID are optional.
+type EnrollParams struct {
+	OrganizationID string
+	Dir            string
+	Name           string
+	ClusterUID     string
+}
+
+// Enroll runs `retyc --json machine enroll` in p.Dir and calls emit with each event as it comes
+// (pending first, then approved, denied or expired). It blocks until the CLI exits, which can take
+// as long as the request lives: c.Timeout does not apply, only ctx. It returns nil once approved;
+// an *Error otherwise, ErrEnrollmentExpired (run it again with the same directory: its keys are
+// reused) or ErrEnrollmentDenied for those outcomes. A line that is not an event is skipped. The
+// client's identity is not used: enrolling needs no login.
+func (c *Client) Enroll(ctx context.Context, p EnrollParams, emit func(EnrollEvent)) error {
+	args := []string{"machine", "enroll", "--org", p.OrganizationID, "--output-dir", p.Dir}
+	if p.Name != "" {
+		args = append(args, "--name", p.Name)
+	}
+	if p.ClusterUID != "" {
+		args = append(args, "--cluster-uid", p.ClusterUID)
+	}
+	anonymous := *c
+	anonymous.Identity = nil
+	env, _, err := anonymous.environ()
+	if err != nil {
+		return err
+	}
+
+	//nolint:gosec // G204: BinPath and args are controller-configured, not user input
+	cmd := exec.CommandContext(ctx, c.BinPath, append([]string{"--json"}, args...)...)
+	cmd.Env = env
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return cliError(args, err, nil)
+	}
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		if ev, err := ParseEnrollEvent(scanner.Bytes()); err == nil {
+			emit(ev)
+		}
+	}
+	// Wait closes the pipe: read it to the end first.
+	if err := cmd.Wait(); err != nil {
+		return cliError(args, err, stderr.Bytes())
+	}
+
+	return scanner.Err()
 }

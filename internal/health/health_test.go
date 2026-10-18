@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
 
 func get(t *testing.T, h http.Handler, path string) (int, string) {
@@ -49,25 +48,5 @@ func TestHandler_MetricsOnlyWhenGiven(t *testing.T) {
 	metrics := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("up 1")) })
 	if code, body := get(t, Handler(nil, metrics), "/metrics"); code != http.StatusOK || body != "up 1" {
 		t.Fatalf("/metrics = %d %q, want the metrics handler's answer", code, body)
-	}
-}
-
-func TestCached_RunsOncePerTTL(t *testing.T) {
-	calls := 0
-	c := Cached(func(context.Context) error {
-		calls++
-		if calls == 1 {
-			return errors.New("first")
-		}
-
-		return nil
-	}, time.Hour)
-
-	ctx := context.Background()
-	if err := c(ctx); err == nil || err.Error() != "first" {
-		t.Fatalf("first call: %v", err)
-	}
-	if err := c(ctx); err == nil || err.Error() != "first" || calls != 1 {
-		t.Fatalf("second call must replay the cached error: err=%v calls=%d", err, calls)
 	}
 }

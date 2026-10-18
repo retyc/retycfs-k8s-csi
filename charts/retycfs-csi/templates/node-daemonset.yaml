@@ -25,9 +25,6 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        {{- if and .Values.credentials.create (not .Values.credentials.existingSecret) .Values.credentials.token }}
-        checksum/credentials: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
-        {{- end }}
         checksum/mount-config: {{ include (print $.Template.BasePath "/mount-config.yaml") . | sha256sum }}
         {{- if include "retycfs-csi.redisURLSecret" . }}
         checksum/redis: {{ include (print $.Template.BasePath "/redis-secret.yaml") . | sha256sum }}
@@ -67,6 +64,7 @@ spec:
             - --http-endpoint=:{{ .Values.healthPort }}
             - --mount-config=/etc/retycfs-csi/mount.json
             - -v={{ .Values.logLevel }}
+            {{- include "retycfs-csi.identityArgs" . | nindent 12 }}
             {{- range .Values.node.extraArgs }}
             - {{ . | quote }}
             {{- end }}
@@ -106,7 +104,6 @@ spec:
             {{- with .Values.node.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- include "retycfs-csi.credentialsEnvFrom" . | nindent 10 }}
           securityContext:
             privileged: true
             capabilities:
@@ -133,6 +130,8 @@ spec:
             - name: mount-config
               mountPath: /etc/retycfs-csi
               readOnly: true
+            # Copied into the mount Secret of a volume staged without node-stage secrets.
+            {{- include "retycfs-csi.identityVolumeMount" . | nindent 12 }}
             {{- with .Values.node.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -160,6 +159,7 @@ spec:
         - name: mount-config
           configMap:
             name: {{ include "retycfs-csi.fullname" . }}-mount-config
+        {{- include "retycfs-csi.identityVolume" . | nindent 8 }}
         {{- with .Values.node.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

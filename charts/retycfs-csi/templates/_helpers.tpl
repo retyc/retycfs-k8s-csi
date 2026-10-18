@@ -52,7 +52,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if .Values.serviceAccount.controller.create }}
 {{- default (printf "%s-controller" (include "retycfs-csi.fullname" .)) .Values.serviceAccount.controller.name }}
 {{- else }}
-{{- default "default" .Values.serviceAccount.controller.name }}
+{{- required "serviceAccount.controller.name is required when serviceAccount.controller.create is false (the default ServiceAccount must not be used)" .Values.serviceAccount.controller.name }}
 {{- end }}
 {{- end }}
 
@@ -60,52 +60,100 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if .Values.serviceAccount.node.create }}
 {{- default (printf "%s-node" (include "retycfs-csi.fullname" .)) .Values.serviceAccount.node.name }}
 {{- else }}
-{{- default "default" .Values.serviceAccount.node.name }}
+{{- required "serviceAccount.node.name is required when serviceAccount.node.create is false (the default ServiceAccount must not be used)" .Values.serviceAccount.node.name }}
+{{- end }}
+{{- end }}
+
+{{- define "retycfs-csi.enroller.serviceAccountName" -}}
+{{- if .Values.serviceAccount.enroller.create }}
+{{- default (printf "%s-enroller" (include "retycfs-csi.fullname" .)) .Values.serviceAccount.enroller.name }}
+{{- else }}
+{{- required "serviceAccount.enroller.name is required when serviceAccount.enroller.create is false (the default ServiceAccount must not be used)" .Values.serviceAccount.enroller.name }}
 {{- end }}
 {{- end }}
 
 {{/*
-Name of the Secret carrying the cluster-wide identity, or "" when the driver runs without one.
+Secret of the cluster-wide identity, written by the enroller (internal/enroller/secret.go); a
+tenant's is this name, "-" and its namespace.
 */}}
-{{- define "retycfs-csi.credentialsSecretName" -}}
-{{- if .Values.credentials.existingSecret }}
-{{- .Values.credentials.existingSecret }}
-{{- else if and .Values.credentials.create .Values.credentials.token }}
-{{- printf "%s-credentials" (include "retycfs-csi.fullname" .) }}
+{{- define "retycfs-csi.identitySecretName" -}}
+retycfs-identity
+{{- end }}
+
+{{/*
+Type of the identities' Secrets, the only ones the enroller writes.
+*/}}
+{{- define "retycfs-csi.identitySecretType" -}}
+csi.retycfs.com/machine-identity
+{{- end }}
+
+{{/*
+Where the driver reads the cluster-wide identity (--identity-dir, its default).
+*/}}
+{{- define "retycfs-csi.identityDir" -}}
+/var/run/retycfs-csi/identity
+{{- end }}
+
+{{/*
+Fails on the values of the token identity, removed: a forgotten one must not leave a release
+without the identity it expects.
+*/}}
+{{- define "retycfs-csi.validate" -}}
+{{- if hasKey .Values "credentials" }}
+{{- fail "credentials.* is gone (RETYC_TOKEN, RETYC_KEY_PASSPHRASE): the driver enrolls a Retyc machine account instead, set identity.organizationID (see NOTES)" }}
+{{- end }}
+{{- range .Values.storageClasses }}
+{{- if hasKey . "tenantSecretName" }}
+{{- fail (printf "storageClasses[%s].tenantSecretName is gone: set tenant: true (the Secret is retycfs-identity-<namespace>, made by the enroller)" .name) }}
+{{- end }}
 {{- end }}
 {{- end }}
 
 {{/*
-True when at least one StorageClass uses per-namespace Secrets (the provisioner then needs to read them).
+True when at least one StorageClass uses per-namespace identities.
 */}}
 {{- define "retycfs-csi.usesTenantSecrets" -}}
 {{- $uses := false }}
-{{- range .Values.storageClasses }}{{ if .tenantSecretName }}{{ $uses = true }}{{ end }}{{ end }}
+{{- range .Values.storageClasses }}{{ if .tenant }}{{ $uses = true }}{{ end }}{{ end }}
 {{- $uses }}
 {{- end }}
 
 {{/*
-envFrom block for the cluster-wide identity, if any.
+The StorageClasses this release renders, as a JSON list of names: the tenant ones, and the others
+only with a cluster-wide identity.
 */}}
-{{- define "retycfs-csi.credentialsEnvFrom" -}}
-{{- with include "retycfs-csi.credentialsSecretName" . }}
-envFrom:
-  - secretRef:
-      name: {{ . }}
+{{- define "retycfs-csi.storageClassNames" -}}
+{{- $names := list }}
+{{- range .Values.storageClasses }}
+{{- if or .tenant $.Values.identity.organizationID }}{{ $names = append $names .name }}{{ end }}
 {{- end }}
+{{- $names | toJson }}
 {{- end }}
 
 {{/*
-The StorageClasses this release renders, as a JSON list of names: those with a tenantSecretName,
-and the others only when a cluster-wide identity exists.
+Volume and mount of the cluster-wide identity: optional, it exists once enrolled; the kubelet
+refreshes it in place when approved. The driver runs as root and reads it at each use.
 */}}
-{{- define "retycfs-csi.storageClassNames" -}}
-{{- $global := include "retycfs-csi.credentialsSecretName" . }}
-{{- $names := list }}
-{{- range .Values.storageClasses }}
-{{- if or .tenantSecretName $global }}{{ $names = append $names .name }}{{ end }}
+{{- define "retycfs-csi.identityVolume" -}}
+- name: identity
+  secret:
+    secretName: {{ include "retycfs-csi.identitySecretName" . }}
+    optional: true
+    defaultMode: 0400
 {{- end }}
-{{- $names | toJson }}
+
+{{- define "retycfs-csi.identityVolumeMount" -}}
+- name: identity
+  mountPath: {{ include "retycfs-csi.identityDir" . }}
+  readOnly: true
+{{- end }}
+
+{{/*
+Arguments of the driver on the cluster-wide identity. The pods are Ready without it: its approval
+shows on the RetycIdentity, not on the driver, so that `helm install --wait` does not wait for it.
+*/}}
+{{- define "retycfs-csi.identityArgs" -}}
+- --identity-dir={{ include "retycfs-csi.identityDir" . }}
 {{- end }}
 
 {{/*

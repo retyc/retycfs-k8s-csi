@@ -236,7 +236,8 @@ func (s *NodeServer) recoverVolume(
 		}
 		nst, err := s.Pods.Ensure(ctx, spec)
 		if errors.Is(err, mountpod.ErrGaveUp) {
-			return metricState(nst.Phase), time.Time{}, s.reportGaveUp(ctx, st, nst, err)
+			// A give-up on a 77 expires (GiveUpUntil): one more try then; none for a 78.
+			return metricState(nst.Phase), nst.Backoff.GiveUpUntil, s.reportGaveUp(ctx, st, nst, err)
 		}
 		if err == nil {
 			s.gaveUp.Delete(volumeID) // no longer given up (deleted by hand): a new give-up is reported

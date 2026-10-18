@@ -27,12 +27,6 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
-  {{- if eq (include "retycfs-csi.usesTenantSecrets" .) "true" }}
-  # StorageClasses with a tenantSecretName make the provisioner read the claim namespace's Secret.
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list"]
-  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -76,12 +70,6 @@ rules:
   - apiGroups: ["storage.k8s.io"]
     resources: ["volumeattributesclasses"]
     verbs: ["get", "list", "watch"]
-  {{- if eq (include "retycfs-csi.usesTenantSecrets" .) "true" }}
-  # StorageClasses with a tenantSecretName make the resizer read the claim namespace's Secret.
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get"]
-  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -96,6 +84,69 @@ subjects:
 roleRef:
   kind: ClusterRole
   name: {{ include "retycfs-csi.fullname" . }}-resizer
+  apiGroup: rbac.authorization.k8s.io
+{{- if eq (include "retycfs-csi.usesTenantSecrets" .) "true" }}
+---
+# Tenant StorageClasses: csi-provisioner and csi-resizer read the tenants' identities, Secrets of
+# the driver's namespace only (never the tenants' namespaces).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "retycfs-csi.fullname" . }}-controller-secrets
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "retycfs-csi.fullname" . }}-controller-secrets
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "retycfs-csi.controller.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "retycfs-csi.fullname" . }}-controller-secrets
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+---
+# The controller plugin itself: the namespace of a claim, against the one a tenant identity was
+# enrolled for (its UID), and events on the claims.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "retycfs-csi.fullname" . }}-controller
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "retycfs-csi.fullname" . }}-controller
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "retycfs-csi.controller.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "retycfs-csi.fullname" . }}-controller
   apiGroup: rbac.authorization.k8s.io
 {{- if eq (include "retycfs-csi.leaderElection" .) "true" }}
 ---
@@ -133,7 +184,7 @@ roleRef:
 # Node plugin: reads the claims it stages (their annotations) and records events on them. Before
 # mounting a volume with the driver's own identity (no node-stage secrets), it reads its PV (by name
 # from the claim, else by listing them for the volume handle) and the PV's StorageClass: a tenant
-# class is refused.
+# class is refused. It checks a tenant identity against the claim's namespace (its UID).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -149,6 +200,9 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["events"]
@@ -169,8 +223,9 @@ roleRef:
   name: {{ include "retycfs-csi.fullname" . }}-node
   apiGroup: rbac.authorization.k8s.io
 ---
-# Node plugin, in the driver's namespace only: the mount pods and their Secrets (copies of the
-# identities they mount with).
+# Node plugin, in the driver's namespace only: the mount pods and their Secrets (Opaque copies of
+# the identities they mount with, retycfs-mount-*). kubelet, not the plugin, reads the node-stage
+# secrets.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -201,4 +256,102 @@ roleRef:
   kind: Role
   name: {{ include "retycfs-csi.fullname" . }}-node
   apiGroup: rbac.authorization.k8s.io
+---
+# Enroller: watches every RetycIdentity and writes its status and finalizer, creates the
+# cluster-wide one (identity.organizationID), reads the namespaces (their UIDs, kube-system's as
+# the cluster's) and the PVs (which still use an identity's Secret).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "retycfs-csi.fullname" . }}-enroller
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["csi.retycfs.com"]
+    resources: ["retycidentities"]
+    verbs: ["get", "list", "watch", "create", "update"]
+  - apiGroups: ["csi.retycfs.com"]
+    resources: ["retycidentities/status"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "retycfs-csi.fullname" . }}-enroller
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "retycfs-csi.enroller.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "retycfs-csi.fullname" . }}-enroller
+  apiGroup: rbac.authorization.k8s.io
+---
+# Enroller, in the driver's namespace only: the identities' Secrets (the admission policy keeps it
+# to those).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "retycfs-csi.fullname" . }}-enroller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "retycfs-csi.fullname" . }}-enroller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "retycfs-csi.enroller.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "retycfs-csi.fullname" . }}-enroller
+  apiGroup: rbac.authorization.k8s.io
+---
+# Aggregated to the built-in edit and admin roles: a namespace's editors ask for its identity
+# (a RetycIdentity), never read its keys (a Secret of the driver's namespace) nor write its status.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "retycfs-csi.fullname" . }}-identity-edit
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups: ["csi.retycfs.com"]
+    resources: ["retycidentities"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "retycfs-csi.fullname" . }}-identity-view
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+rules:
+  - apiGroups: ["csi.retycfs.com"]
+    resources: ["retycidentities"]
+    verbs: ["get", "list", "watch"]
 {{- end }}

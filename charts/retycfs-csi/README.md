@@ -5,37 +5,51 @@ backed by Retyc datarooms, with end-to-end post-quantum encryption.
 
 ## Install
 
-From the Helm repository:
+The driver namespace runs privileged mount pods, so it needs the Pod Security label `privileged`. Use a namespace of
+its own: the controller, the enroller and the node plugin read the Secrets of their namespace, which hold the machine accounts' keys
+(`kube-system` is discouraged).
 
 ```sh
+kubectl create namespace retycfs-system
+kubectl label namespace retycfs-system pod-security.kubernetes.io/enforce=privileged
 helm repo add retyc https://retyc.github.io/retycfs-k8s-csi
 helm install retycfs-csi retyc/retycfs-csi \
-  --namespace kube-system \
-  --set credentials.token="$RETYC_TOKEN" \
-  --set credentials.keyPassphrase="$RETYC_KEY_PASSPHRASE"
+  --namespace retycfs-system \
+  --set identity.organizationID=<Retyc organization UUID>
 ```
 
 From the OCI registry (`--version` selects a chart version; omit it for the latest):
 
 ```sh
-helm install retycfs-csi oci://ghcr.io/retyc/charts/retycfs-csi --version <chart version> -n kube-system ...
+helm install retycfs-csi oci://ghcr.io/retyc/charts/retycfs-csi --version <chart version> -n retycfs-system ...
 ```
 
-Or point the chart at a Secret you manage yourself (keys `RETYC_TOKEN` and `RETYC_KEY_PASSPHRASE`):
+There is no token or passphrase to give. With `identity.organizationID`, the enroller creates the `RetycIdentity`
+`default` of the release namespace and requests a Retyc machine account for it. An administrator of the organization
+approves the request in Retyc (Organization > Machines, or `retyc machine approve`) after comparing the fingerprint:
 
 ```sh
-helm install retycfs-csi retyc/retycfs-csi -n kube-system --set credentials.existingSecret=retycfs-csi-credentials
+kubectl -n retycfs-system get retycidentity default -o wide
 ```
 
-Without either, the driver runs with no cluster-wide identity: the StorageClasses without a `tenantSecretName` are
-not installed, and only per-namespace identities are served.
+The pods are ready without waiting for it (`helm install --wait` returns): until then, the `RetycIdentity` is `Pending`
+and the claims of the cluster-wide classes wait, with an Event that gives the fingerprint. Without `identity.organizationID`, the driver runs with no
+cluster-wide identity: the StorageClasses without `tenant: true` are not installed, and only per-namespace identities
+are served. A tenant namespace applies its own `RetycIdentity` (`name: default`, optional `spec.organizationID`) and has
+it approved; see [Identities](../../doc/configuration.md#identities).
 
-The chart installs the `CSIDriver`, RBAC, the controller `Deployment`, the node `DaemonSet`, the mount pods'
-configuration, a `ValidatingAdmissionPolicy` on the claims' `csi.retycfs.com/*` annotations and up to three
-StorageClasses (`retycfs-rwx`, `retycfs-rwx-retain`, `retycfs-rwx-tenant`). Each staged volume runs in a privileged mount pod
-(`retyc fs mount`) in the release namespace, which must allow it (Pod Security `privileged`). Restarting the node plugin
+The chart installs the `CSIDriver`, the `RetycIdentity` CRD (kept on uninstall, see [Uninstall](../../doc/configuration.md#uninstall)), RBAC, the controller `Deployment`, the
+enroller `Deployment`, the node `DaemonSet`, the mount pods' configuration, two `ValidatingAdmissionPolicy` (the claims'
+`csi.retycfs.com/*` annotations, and the identities' Secrets) and up to three StorageClasses (`retycfs-rwx`,
+`retycfs-rwx-retain`, `retycfs-rwx-tenant`). Each staged volume runs in a privileged mount pod
+(`retyc fs mount`) in the release namespace. Restarting the node plugin
 cuts no mount. Every claim needs the `csi.retycfs.com/uid` annotation: the files belong to that UID, and only pods running
 as it can write. See [PVC annotations](../../doc/configuration.md#pvc-annotations) for the others.
+
+Uninstall: delete the PVCs/PVs, then `kubectl delete retycidentity --all -A` and wait for them to disappear, and only then
+`helm uninstall`. Each `RetycIdentity` has the finalizer `csi.retycfs.com/identity`, which only the enroller removes: without
+it they stay `Terminating`. Full procedure, including the Retyc side and the manual finalizer removal:
+[Uninstall](../../doc/configuration.md#uninstall).
 
 **StatefulSets**: put `csi.retycfs.com/uid` in the `volumeClaimTemplates` (`metadata.annotations`). Without it, the
 admission policy refuses each claim the StatefulSet controller creates, and the controller retries in a loop: the
@@ -49,13 +63,11 @@ StatefulSet's pods stay `Pending` and its events repeat the refusal.
 | `image.tag` | `""` | Overrides the image tag; defaults to the chart's `appVersion` |
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | Pull secrets for the driver image, both components (only for a private mirror) |
-| `credentials.create` | `true` | Create the cluster-wide identity Secret from `token` and `keyPassphrase` (when `token` is set) |
-| `credentials.existingSecret` | `""` | Existing Secret with `RETYC_TOKEN` and `RETYC_KEY_PASSPHRASE`; takes precedence |
-| `credentials.token` | `""` | Offline token (`retyc auth login --offline`) |
-| `credentials.keyPassphrase` | `""` | Passphrase of the account's AGE key |
-| `storageClasses` | three classes | `name`, `reclaimPolicy`, `volumeBindingMode`, `isDefault`, `annotations`, `tenantSecretName`. All allow expansion; a class without `tenantSecretName` is only installed with a cluster-wide identity |
-| `rbac.create` | `true` | Create the ClusterRoles/Roles and bindings |
-| `serviceAccount.controller.*` / `serviceAccount.node.*` | create | `create`, `name`, `annotations` |
+| `identity.organizationID` | `""` | UUID of the Retyc organization of the cluster-wide identity. Set, the enroller creates the `RetycIdentity` `default` of the release namespace (Secret `retycfs-identity`) and the classes without `tenant` are installed. Also the organization of tenant `RetycIdentity` without `spec.organizationID` |
+| `identity.clusterName` | `kubernetes` | Prefix of the machines' default display name in Retyc, `<clusterName>/<namespace>` |
+| `storageClasses` | three classes | `name`, `reclaimPolicy`, `volumeBindingMode`, `isDefault`, `annotations`, `tenant`. All allow expansion; `tenant: true` uses the Secret `retycfs-identity-<claim namespace>` of the release namespace; a class without it is only installed with `identity.organizationID` |
+| `rbac.create` | `true` | Create the ClusterRoles/Roles and bindings, and the roles aggregated to `edit`/`admin` (write) and `view` (read) on `RetycIdentity` |
+| `serviceAccount.controller.*` / `serviceAccount.node.*` / `serviceAccount.enroller.*` | create | `create`, `name`, `annotations`. The identity Secrets policy lets only the enroller's service account write the identities' Secrets |
 | `extraObjects` | `[]` | Extra manifests rendered as templates (see values.yaml for NetworkPolicy examples) |
 | `healthPort` | `9808` | `/healthz`, `/readyz` and `/metrics` port of the driver containers |
 | `metrics.podMonitor.enabled` | `false` | Create two Prometheus Operator `PodMonitor`s: both driver components, and the mount pods (port `metrics`, 9567) |
@@ -71,6 +83,9 @@ StatefulSet's pods stay `Pending` and its events repeat the refusal.
 | `controller.extraVolumes` / `controller.extraVolumeMounts` | `[]` | Extra volumes for the driver container (e.g. a private CA bundle) |
 | `controller.hostAliases` | `[]` | Extra `/etc/hosts` entries |
 | `controller.{podAnnotations,podLabels,nodeSelector,tolerations,affinity,topologySpreadConstraints,priorityClassName}` | | Scheduling (anti-affinity example in values.yaml) |
+| `enroller.resources` | requests `cpu: 10m`, `memory: 32Mi`; limits `memory: 256Mi` | Enroller container resources (one `retyc machine enroll` process per pending enrollment) |
+| `enroller.extraArgs` / `extraEnv` / `extraVolumes` / `extraVolumeMounts` / `hostAliases` | `[]` | Same as the controller's (egress proxy, private CA bundle...) |
+| `enroller.{podAnnotations,podLabels,nodeSelector,tolerations,affinity,priorityClassName}` | | Scheduling; one replica |
 | `node.kubeletDir` | `/var/lib/kubelet` | Kubelet root on the nodes |
 | `node.resources` | requests `cpu: 10m`, `memory: 32Mi`; limits `memory: 128Mi` | The node plugin runs no retyc process |
 | `node.registrar.image.*` | `csi-node-driver-registrar:v2.17.0` | Sidecar image |
@@ -82,7 +97,7 @@ StatefulSet's pods stay `Pending` and its events repeat the refusal.
 | `mount.imagePullSecrets` | `[]` | Pull secrets of the retyc-cli image |
 | `mount.extraEnv` / `mount.hostAliases` | `[]` | Extra environment (after the driver's) and `/etc/hosts` entries of the mount pods |
 | `mount.hostPID` | `false` | Share the host PID namespace (diagnosis only) |
-| `mount.resources` | 50m, 256Mi / 512Mi | Default resources, overridden per claim by the `csi.retycfs.com/mount-*` annotations |
+| `mount.resources` | requests `cpu: 50m`, `memory: 96Mi`; limit `memory: 384Mi` | Default resources, overridden per claim by the `csi.retycfs.com/mount-*` annotations |
 | `mount.drainTimeout` | `5m` | Time a stopping mount pod gets to send its pending writes |
 | `mount.priorityClassName` | `""` | Empty means `system-node-critical` |
 | `mount.spoolDir` | `/var/lib/retycfs-csi/spool` | Host directory of the spools, one per volume |
@@ -93,8 +108,8 @@ StatefulSet's pods stay `Pending` and its events repeat the refusal.
 | `cache.redis.subchart.existingSecret` | `""` | Your own Secret instead, keys `redis-password` and `RETYC_CACHE_REDIS_URL`; set `redis.auth.existingSecret` to the same name |
 | `cache.redis.external.url` | `""` | URL of your own Redis (7.4+, standalone), stored in a Secret by the chart |
 | `cache.redis.external.existingSecret` / `existingSecretKey` | `""` / `RETYC_CACHE_REDIS_URL` | Existing Secret holding the URL instead |
-| `admissionPolicy.enabled` | `true` | `ValidatingAdmissionPolicy` on the annotations of the claims of the chart's StorageClasses |
-| `admissionPolicy.failurePolicy` | `Fail` | `Fail` or `Ignore` when the policy cannot be evaluated; only the claims of the chart's classes are matched |
+| `admissionPolicy.enabled` | `true` | `ValidatingAdmissionPolicy` on the annotations of the claims of the chart's StorageClasses, and on the identities' Secrets (type `csi.retycfs.com/machine-identity`) of the release namespace |
+| `admissionPolicy.failurePolicy` | `Fail` | `Fail` or `Ignore` when the claims policy cannot be evaluated; only the claims of the chart's classes are matched. The Secrets policy always fails closed |
 | `redis.*` | see values | Values of the Redis subchart (`maxmemory`, resources...) |
 
 The Redis URL never goes into the mount pods' ConfigMap: the node plugin reads it from a Secret (`RETYC_CACHE_REDIS_URL`)
@@ -113,6 +128,9 @@ and, when it should ship a new driver, `appVersion` to an image tag that exists 
 chart-releaser then creates the `retycfs-csi-<version>` GitHub release with the package, refreshes `index.yaml` on
 the `gh-pages` branch, and the same package is pushed to `oci://ghcr.io/retyc/charts`.
 
-Per-tenant identities: a StorageClass entry with `tenantSecretName: retycfs-credentials` resolves that Secret in the
-claim's namespace for provisioning and mounting, through the standard `csi.storage.k8s.io/*-secret-*` parameters.
-Use `reclaimPolicy: Retain` on such classes.
+## Per-tenant identities
+
+A StorageClass entry with `tenant: true` resolves the Secret `retycfs-identity-<claim namespace>` of the release
+namespace for provisioning, expansion and mounting, through the standard `csi.storage.k8s.io/*-secret-*` parameters. That
+Secret is written by the enroller from the `RetycIdentity` `default` of the claim's namespace; the tenant cannot read it.
+Use `reclaimPolicy: Retain` on such classes. Details: [Identities](../../doc/configuration.md#identities).
