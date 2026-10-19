@@ -1,5 +1,5 @@
 # Shared listing cache for every mount pod of the cluster, on the bundled Redis subchart
-# (CloudPirates, standalone, no persistence). helm install ... -f examples/charts/redis-values.yaml
+# (CloudPirates, standalone, no persistence). helm install ... -f examples/helm-values/redis-values.yaml
 cache:
   store: redis
   # Several Retyc identities (tenant StorageClasses) share this Redis: keep the names encrypted in it.

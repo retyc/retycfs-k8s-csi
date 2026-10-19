@@ -1,3 +1,5 @@
+# This repo's chart in the test VMs (CLUSTER_CHART=dev, set in .env.local): the driver image of
+# `make image-dev vm-load`, the development API and CLI, and the Secret created by `make vm-secret`.
 image:
   tag: dev
   imagePullPolicy: "always"

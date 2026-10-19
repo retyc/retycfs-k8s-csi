@@ -1,5 +1,5 @@
-# The published chart in the test VMs (CLUSTER_CHART=prod in .env.local): released images, the
-# production API, and the Secret created by `make vm-secret`.
+# The published chart in the test VMs (CLUSTER_CHART=prod, the default of .env): released images,
+# the production API, and the Secret created by `make vm-secret`.
 credentials:
   existingSecret: 'retycfs-csi-credentials'
 
