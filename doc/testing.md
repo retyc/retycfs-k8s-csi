@@ -60,14 +60,14 @@ removes the VMs; recreate them after changing `CLUSTER_MODE`.
 
 In the server (`vagrant ssh server`, `cd /vagrant`):
 
-- `kubectl apply -f examples/charts/rwx-test.yaml`: the claim is `Bound`; the writer writes, the reader (another UID)
+- `kubectl apply -f examples/manifests/rwx-test.yaml`: the claim is `Bound`; the writer writes, the reader (another UID)
   gets `Permission denied`.
 - A claim without the `csi.retycfs.com/uid` annotation is refused.
 - Killing a mount process (`sudo pkill -9 -f '^/retyc fs mount'` on its node): the volume comes back within ~20 s,
   without restarting the pods.
 - Restarting the node plugin pods cuts no mount.
 - Deleting the pods removes their mount pods.
-- Two nodes: `kubectl apply -f examples/charts/privatebin.yaml` runs PrivateBin on each node; a paste created through
+- Two nodes: `kubectl apply -f examples/manifests/privatebin.yaml` runs PrivateBin on each node; a paste created through
   one is readable at once through the other (Redis). With the memory cache, it can take up to a minute.
 
-`kubectl delete -f examples/charts/rwx-test.yaml` removes the claim and its dataroom.
+`kubectl delete -f examples/manifests/rwx-test.yaml` removes the claim and its dataroom.

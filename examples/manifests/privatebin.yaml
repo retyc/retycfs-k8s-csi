@@ -4,7 +4,7 @@
 # session affinity: a paste created through one node is read through another.
 #
 # Each node mounts the claim with its own mount pod. Install the chart with the shared Redis cache
-# (examples/charts/redis-values.yaml), so that every mount pod sees the others' pastes at once; with the
+# (examples/helm-values/redis-values.yaml), so that every mount pod sees the others' pastes at once; with the
 # default memory cache, each mount pod keeps its own listings, and another node's paste may not be
 # found for up to the cache TTL (1 min by default, csi.retycfs.com/cache-ttl).
 #

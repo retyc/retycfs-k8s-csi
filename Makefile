@@ -92,7 +92,7 @@ CLUSTER_MODE := $(call vm_env,CLUSTER_MODE)
 
 VM_NODES := server $(if $(filter multi,$(CLUSTER_MODE)),agent)
 VM_CHART_REPO ?= https://retyc.github.io/retycfs-k8s-csi
-VM_VALUES ?= examples/helm-values/$(CLUSTER_CHART)-vagrant-values.yaml $(if $(filter multi,$(CLUSTER_MODE)),examples/charts/redis-values.yaml)
+VM_VALUES ?= examples/helm-values/$(CLUSTER_CHART)-vagrant-values.yaml $(if $(filter multi,$(CLUSTER_MODE)),examples/helm-values/redis-values.yaml)
 VM_CHECK = @case "$(CLUSTER_CHART)/$(CLUSTER_MODE)" in dev/multi|dev/single|prod/multi|prod/single) ;; \
 	*) echo "CLUSTER_CHART must be dev or prod and CLUSTER_MODE multi or single (.env, .env.local), not '$(CLUSTER_CHART)' and '$(CLUSTER_MODE)'"; exit 1 ;; esac
 
@@ -112,7 +112,7 @@ vm-secret:
 	  vagrant ssh server -c "kubectl -n kube-system create secret generic retycfs-csi-credentials --from-env-file=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -"
 
 ## Install or upgrade the chart as CLUSTER_CHART and CLUSTER_MODE say, with VM_VALUES:
-## examples/helm-values/<dev|prod>-vagrant-values.yaml, plus examples/charts/redis-values.yaml in
+## examples/helm-values/<dev|prod>-vagrant-values.yaml, plus examples/helm-values/redis-values.yaml in
 ## multi mode. dev installs this repo's chart (its Redis subchart fetched first if missing), prod
 ## the latest published one. Without --reuse-values: what a scenario --set is dropped.
 ## Typical loop: make image-dev vm-load vm-helm vm-restart

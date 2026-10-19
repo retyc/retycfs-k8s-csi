@@ -53,7 +53,7 @@ $ kubectl -n kube-system get pods -l app.kubernetes.io/instance=retycfs-csi
 Deploy the test resources, a claim with a writer pod and a reader pod:
 
 ```console
-$ kubectl create -f https://raw.githubusercontent.com/retyc/retycfs-k8s-csi/master/examples/charts/rwx-test.yaml
+$ kubectl create -f https://raw.githubusercontent.com/retyc/retycfs-k8s-csi/master/examples/manifests/rwx-test.yaml
 $ kubectl logs -f retycfs-reader
 ```
 
@@ -67,7 +67,7 @@ $ kubectl -n kube-system get pods -l app.kubernetes.io/name=retycfs-mount
 Delete the test resources:
 
 ```console
-$ kubectl delete -f https://raw.githubusercontent.com/retyc/retycfs-k8s-csi/master/examples/charts/rwx-test.yaml
+$ kubectl delete -f https://raw.githubusercontent.com/retyc/retycfs-k8s-csi/master/examples/manifests/rwx-test.yaml
 ```
 
 The dataroom is gone as well.

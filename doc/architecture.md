@@ -106,7 +106,7 @@ turned off (`RETYC_KEYRING_ENABLED=false`) everywhere: every mount pod runs as r
    reservation that already covers the request is left alone, so a retry succeeds.
 7. **Deletion.** With `reclaimPolicy: Delete`, deleting the claim makes the provisioner call `DeleteVolume`, i.e.
    `retyc dataroom rm retyc://<id> -y`. A dataroom already gone is a success. With `Retain`, the PV is released and the
-   dataroom kept; `examples/charts/static-pv.yaml` shows how to adopt it again.
+   dataroom kept; `examples/manifests/static-pv.yaml` shows how to adopt it again.
 
 ### Settings read at stage
 

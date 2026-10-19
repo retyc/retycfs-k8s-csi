@@ -94,7 +94,7 @@ The mount settings of a static PV are read from its `volumeAttributes`, with the
 (`csi.retycfs.com/uid` is required there too). Add `pvcName` and `pvcNamespace` to have the claim's annotations read as
 well: they then win over `volumeAttributes`. Without them, only `volumeAttributes` count. The chart's admission policy
 requires `csi.retycfs.com/uid` on the claim of a static PV on its classes, so put it on both. Fill in and apply
-[`examples/charts/static-pv.yaml`](../examples/charts/static-pv.yaml), with `persistentVolumeReclaimPolicy: Retain`: the provisioner
+[`examples/manifests/static-pv.yaml`](../examples/manifests/static-pv.yaml), with `persistentVolumeReclaimPolicy: Retain`: the provisioner
 never deletes volumes it did not create.
 
 **A static PV of a tenant class needs its own `nodeStageSecretRef`.** kubelet takes the node-stage secret from the PV,
@@ -140,7 +140,7 @@ kubectl patch pvc shared-docs -p '{"spec":{"volumeAttributesClassName":"retycfs-
 
 **Disabling versioning is destructive**: the driver confirms it without asking, and the next completed upload of each
 file deletes its older versions. For a tenant class, the resizer authenticates with the controller-expand secret. See
-[`examples/charts/volume-attributes-class.yaml`](../examples/charts/volume-attributes-class.yaml).
+[`examples/manifests/volume-attributes-class.yaml`](../examples/manifests/volume-attributes-class.yaml).
 
 ## StorageClasses
 
@@ -195,7 +195,7 @@ What to know before rolling it out:
 - a tenant's new credentials apply to its mount pods at the next mount of each volume (another config hash);
 - with a shared Redis, set `cache.highConfidentiality: true` (NOTES warns otherwise).
 
-Example, with a namespace, its Secret, a claim and two pods: [`examples/charts/tenant.yaml`](../examples/charts/tenant.yaml).
+Example, with a namespace, its Secret, a claim and two pods: [`examples/manifests/tenant.yaml`](../examples/manifests/tenant.yaml).
 
 ## Chart values
 
@@ -256,7 +256,10 @@ it into each mount pod's own Secret.
 `cache.redis.subchart.existingSecret`.** The generated password is kept across upgrades with Helm's `lookup`, which
 returns nothing outside `helm install`/`upgrade`: each render would then produce a new password and change the Redis
 Secret, while the Redis StatefulSet keeps the former one. The mount pods would then fail to authenticate, and get
-another config than the running ones. See [`examples/charts/redis-values.yaml`](../examples/charts/redis-values.yaml).
+another config than the running ones.
+
+A complete Redis setup (subchart, high confidentiality, sizing, or your own Redis):
+[`examples/helm-values/redis-values.yaml`](../examples/helm-values/redis-values.yaml).
 
 ### Admission policy
 
