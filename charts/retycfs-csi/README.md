@@ -93,7 +93,7 @@ StatefulSet's pods stay `Pending` and its events repeat the refusal.
 | `node.extraVolumes` / `node.extraVolumeMounts` | `[]` | Extra volumes for the driver container |
 | `node.updateStrategy` | `RollingUpdate`, `maxUnavailable: 1` | |
 | `node.{podAnnotations,podLabels,nodeSelector,tolerations,affinity,priorityClassName}` | tolerate all | Scheduling |
-| `mount.image.*` | `ghcr.io/retyc/retyc-cli:v1.5.0` | Mount pods' image; must match the Dockerfile's `RETYC_CLI_VERSION` (checked in CI) |
+| `mount.image.*` | `ghcr.io/retyc/retyc-cli:v1.6.0-beta1` | Mount pods' image; must match the Dockerfile's `RETYC_CLI_VERSION` (checked in CI) |
 | `mount.imagePullSecrets` | `[]` | Pull secrets of the retyc-cli image |
 | `mount.extraEnv` / `mount.hostAliases` | `[]` | Extra environment (after the driver's) and `/etc/hosts` entries of the mount pods |
 | `mount.hostPID` | `false` | Share the host PID namespace (diagnosis only) |

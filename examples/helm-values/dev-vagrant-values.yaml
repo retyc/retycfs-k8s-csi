@@ -37,14 +37,13 @@ enroller:
     - ip: '192.168.121.1'
       hostnames: ['api.triplesfer.traefik.me', 'auth.triplesfer.traefik.me']
 
-# The development CLI with machine enrollment (no `prod` tag), a local build imported into the VMs
-# (not published): `make image-dev CLI_DEV_TAG=machine-enroll CLI_PULL=0` embeds the same in the
-# controller and the enroller.
+# The development CLI (no `prod` tag), published from its master: `make image-dev` embeds the same in
+# the controller and the enroller.
 mount:
   image:
     repository: ghcr.io/retyc/retyc-cli-dev
-    tag: machine-enroll
-    pullPolicy: IfNotPresent
+    tag: master
+    pullPolicy: Always
   extraEnv:
     - name: RETYC_API_BASE_URL
       value: 'https://api.triplesfer.traefik.me'

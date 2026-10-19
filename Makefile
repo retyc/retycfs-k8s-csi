@@ -45,7 +45,7 @@ clean:
 ## `make image RETYC_CLI_VERSION=commit-xxxxxxx` overrides it for a one-off build, `RETYC_CLI_IMAGE`
 ## the CLI image repository, `VERSION=v1.0.0` the image version. With RETYC_CLI_VERSION, `--pull`
 ## fetches that CLI tag again: a moving one (master) would otherwise stay at its local copy;
-## CLI_PULL=0 keeps the local one (e.g. make image-dev CLI_DEV_TAG=machine-enroll CLI_PULL=0).
+## CLI_PULL=0 keeps the local one (e.g. make image-dev CLI_DEV_TAG=<local tag> CLI_PULL=0).
 image:
 	docker build \
 	  $(if $(RETYC_CLI_VERSION),--no-cache $(if $(filter 1,$(CLI_PULL)),--pull) --build-arg RETYC_CLI_VERSION=$(RETYC_CLI_VERSION) --build-arg SOURCE_DATE_EPOCH=0) \

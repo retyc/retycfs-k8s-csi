@@ -26,8 +26,8 @@ can be expanded, and their versioning switched through a VolumeAttributesClass.
 - a namespace for the driver that allows privileged pods (Pod Security `privileged`): `retycfs-system`, created below;
 - a Retyc organization, its UUID, and an administrator of it who approves the driver's machine account. The driver
   holds no token and no passphrase: it enrolls a [machine account](doc/configuration.md#identities).
-- a retyc-cli release with machine accounts (`retyc machine enroll`), in the driver image and as `mount.image.tag`:
-  until one is published, build it from its `feat/machine_enroll` branch (see [doc/testing.md](doc/testing.md)).
+- for a custom `mount.image.tag` or driver image: retyc-cli v1.6.0-beta1 or later (machine accounts, `retyc machine
+  enroll`). The chart's defaults already use it.
 
 ## How to deploy RetycFS CSI driver to your cluster
 

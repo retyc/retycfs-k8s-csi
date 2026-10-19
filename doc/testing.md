@@ -61,8 +61,9 @@ retyc machine approve <enrollment-id> --fingerprint XXXX-... -y   # the dev org 
 
 The dev values set `image.pullPolicy: IfNotPresent`: the image imported by `make vm-load` is never pulled from a registry.
 
-The development CLI with machine enrollment is not published. Build it in the CLI repository, then build the driver on
-it without pulling, and import the CLI image into every node (the mount pods run it):
+The mount pods pull the development CLI (`ghcr.io/retyc/retyc-cli-dev:master`), which `make image-dev` also embeds. To
+test an unpublished CLI instead, build it in the CLI repository, build the driver on it without pulling, and import the
+CLI image into every node:
 
 ```sh
 make image-dev CLI_DEV_TAG=<tag> CLI_PULL=0
