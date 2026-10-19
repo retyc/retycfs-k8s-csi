@@ -26,6 +26,9 @@ metadata:
     # Owner of every file of the volume: the UID and GID PrivateBin runs as (securityContext below).
     csi.retycfs.com/uid: "65534"
     csi.retycfs.com/gid: "82"
+    # Performance tuning
+    csi.retycfs.com/background-delete: "true"
+    csi.retycfs.com/unsafe-write: "true"
 spec:
   accessModes: [ReadWriteMany]
   storageClassName: retycfs-rwx
