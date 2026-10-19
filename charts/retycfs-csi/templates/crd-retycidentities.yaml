@@ -1,0 +1,174 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: retycidentities.csi.retycfs.com
+  annotations:
+    # Deleting the CRD would delete every RetycIdentity, and with them the identities' Secrets.
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+spec:
+  group: csi.retycfs.com
+  scope: Namespaced
+  names:
+    kind: RetycIdentity
+    listKind: RetycIdentityList
+    plural: retycidentities
+    singular: retycidentity
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Fingerprint
+          type: string
+          jsonPath: .status.fingerprint
+        - name: Active
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Active")].status
+        - name: Reason
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Active")].reason
+          priority: 1
+        - name: Machine
+          type: string
+          jsonPath: .status.machineID
+        - name: Approval
+          type: string
+          jsonPath: .status.approvalURI
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          description: >-
+            Asks the RetycFS CSI driver's enroller for a Retyc machine account for this namespace. In the
+            driver's namespace, it is the cluster-wide identity (Secret retycfs-identity); elsewhere, the
+            namespace's tenant identity (Secret retycfs-identity-<namespace> in the driver's namespace).
+            An administrator approves the request in Retyc (Organization > Machines) after comparing the
+            fingerprint. Deleting it never deletes the machine on the Retyc side.
+          type: object
+          x-kubernetes-validations:
+            - rule: "self.metadata.name == 'default'"
+              message: "only one RetycIdentity per namespace, named 'default'"
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              # Always there, so that the transition rule below sees every update (an absent spec
+              # is not compared).
+              default: {}
+              x-kubernetes-validations:
+                # A transition rule: checked on updates only, a creation may set it or not.
+                - rule: >-
+                    has(oldSelf.organizationID) == has(self.organizationID) &&
+                    (!has(self.organizationID) || self.organizationID == oldSelf.organizationID)
+                  message: >-
+                    organizationID cannot be set, changed or removed after creation: delete and
+                    recreate the RetycIdentity
+              properties:
+                organizationID:
+                  description: >-
+                    UUID of the Retyc organization to join. Defaults to the enroller's
+                    --default-organization-id. Immutable: set at creation or never.
+                  type: string
+                  format: uuid
+                  maxLength: 36
+                  pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                displayName:
+                  description: >-
+                    Name of the machine in Retyc. Defaults to "<cluster name>/<namespace>", cut to 63
+                    characters. No "/": that form is kept for the defaults, so that a namespace cannot
+                    pass its request off as another namespace's.
+                  type: string
+                  maxLength: 63
+                  x-kubernetes-validations:
+                    - rule: "!self.contains('/')"
+                      message: "displayName cannot contain '/', kept for the default \"<cluster name>/<namespace>\""
+            status:
+              type: object
+              properties:
+                phase:
+                  description: >-
+                    Pending (awaiting approval), Approved, Denied (recreate the RetycIdentity to enroll
+                    again), Expired (unanswered too many times: annotate csi.retycfs.com/retry), Rejected
+                    (no organization, or configuration refused by Retyc), Blocked (an older identity's
+                    Secret, still used by PVs, is in the way).
+                  type: string
+                  enum: [Pending, Approved, Denied, Expired, Rejected, Blocked]
+                fingerprint:
+                  description: Fingerprint of the request, to compare before approving it.
+                  type: string
+                approvalURI:
+                  description: Where an administrator approves the request.
+                  type: string
+                enrollmentID:
+                  type: string
+                expiresAt:
+                  description: When the pending request expires.
+                  type: string
+                  format: date-time
+                machineID:
+                  type: string
+                clientID:
+                  type: string
+                secretName:
+                  description: The identity's Secret, in the driver's namespace.
+                  type: string
+                attempts:
+                  description: Enrollment requests that expired unanswered since the last retry.
+                  type: integer
+                  format: int32
+                observedGeneration:
+                  type: integer
+                  format: int64
+                observedRetry:
+                  description: Last value of the csi.retycfs.com/retry annotation acted on.
+                  type: string
+                message:
+                  type: string
+                conditions:
+                  description: >-
+                    Enrolled (where the enrollment stands) and Active (the approved machine as Retyc sees
+                    it, checked every 5 minutes; False with reason MachineRefused when disabled or
+                    deleted there, which only an administrator of Retyc can tell apart).
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime, reason, message]
+                    properties:
+                      type:
+                        type: string
+                        maxLength: 316
+                        pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$'
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                        maxLength: 1024
+                        minLength: 1
+                        pattern: '^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$'
+                      message:
+                        type: string
+                        maxLength: 32768

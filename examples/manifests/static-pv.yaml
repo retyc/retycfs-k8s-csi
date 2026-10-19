@@ -8,9 +8,11 @@
 # csi.retycfs.com/uid on every claim of its StorageClasses, so the claim below carries it as well.
 #
 # On a tenant StorageClass (one with node-stage secrets, such as retycfs-rwx-tenant), the PV must
-# name the tenant's Secret itself (nodeStageSecretRef below): kubelet reads it from the PV, not
-# from the class. Without it the node plugin refuses the stage (FailedPrecondition) rather than
-# mount the dataroom with the driver's cluster-wide identity.
+# name the tenant's identity Secret itself (nodeStageSecretRef below, in the driver's namespace):
+# kubelet reads it from the PV, not from the class. Without it the node plugin refuses the stage
+# (FailedPrecondition) rather than mount the dataroom with the driver's cluster-wide identity. It
+# also needs pvcName and pvcNamespace: the identity is checked against the claim's namespace.
+# The tenant's machine needs access to the dataroom (an admin adds it in Retyc).
 #
 # Static PVs are never deleted by the provisioner (no provisioned-by annotation), so
 # reclaimPolicy: Retain is the honest value here — Delete would leave a Released PV with a
@@ -31,10 +33,12 @@ spec:
     volumeAttributes:
       csi.retycfs.com/uid: "1000"                   # owner of the files: the UID the consumer pods run as
       # csi.retycfs.com/gid: "1000"                 # optional, defaults to the UID
-    # Tenant class only: the tenant's credentials, in the claim's namespace.
+      # pvcName: retycfs-adopted                    # required on a tenant class, with pvcNamespace
+      # pvcNamespace: REPLACE-WITH-CLAIM-NAMESPACE
+    # Tenant class only: the identity enrolled for the claim's namespace, in the driver's namespace.
     # nodeStageSecretRef:
-    #   name: retycfs-credentials
-    #   namespace: REPLACE-WITH-CLAIM-NAMESPACE
+    #   name: retycfs-identity-REPLACE-WITH-CLAIM-NAMESPACE
+    #   namespace: retycfs-system
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

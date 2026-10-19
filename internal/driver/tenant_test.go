@@ -13,8 +13,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
-
-	"github.com/retyc/retycfs-k8s-csi/internal/identity"
 )
 
 // addPV creates a PV of the driver for testVolume in class, with or without a node-stage secret
@@ -114,7 +112,7 @@ func TestStageDefaultIdentityTenantCheckAPI(t *testing.T) {
 	e.kube.PrependReactor("*", "persistentvolumes", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("connection refused")
 	})
-	tenant := map[string]string{identity.TokenKey: "tok", identity.PassphraseKey: "pass"}
+	tenant := machineSecrets("tenant-key")
 	if c := e.stage(e.stageRequest(tenant)); c != codes.Aborted {
 		t.Fatalf("stage with tenant secrets = %v, want Aborted (pod starting)", c)
 	}

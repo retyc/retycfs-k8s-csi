@@ -12,15 +12,18 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/record"
 
+	"github.com/retyc/retycfs-k8s-csi/internal/identity"
 	"github.com/retyc/retycfs-k8s-csi/internal/retycclient"
 )
 
 // fakeRetyc is a shell stand-in for the retyc CLI. Each command (ls, quota, create, set, rm) prints
 // <dir>/<command>.json on stdout, or <dir>/<command>.err on stderr with exit code 1 when that file
-// exists. Every call is logged as "<RETYC_TOKEN> <args>" in <dir>/calls.
+// exists. Every call is logged as "<client.key of its identity> <args>" in <dir>/calls.
 type fakeRetyc struct {
 	t   *testing.T
 	dir string
@@ -34,8 +37,9 @@ func newFakeRetyc(t *testing.T) *fakeRetyc {
 	f := &fakeRetyc{t: t, dir: t.TempDir()}
 	script := `#!/bin/sh
 d=` + f.dir + `
-echo "$RETYC_TOKEN $*" >> "$d/calls"
+echo "$(cat "$RETYC_MACHINE_DIR/client.key" 2>/dev/null) $*" >> "$d/calls"
 case "$2 $3" in
+  "dataroom user") c=member ;;
   "dataroom ls") c=ls ;;
   "user quota") c=quota ;;
   "dataroom create") c=create ;;
@@ -55,6 +59,7 @@ cat "$d/$c.json"
 	f.set("create.json", `{"id":"dr-new","title":"pvc-1"}`)
 	f.set("set.json", `{"id":"dr-1"}`)
 	f.set("rm.json", `{"dataroom_id":"dr-1","uri":"retyc://dr-1","deleted_count":1}`)
+	f.set("member.json", `{}`)
 
 	return f
 }
@@ -80,10 +85,30 @@ func (f *fakeRetyc) calls() []string {
 	return lines
 }
 
-// controller returns a ControllerServer running the fake CLI with a default identity, and a fake
-// Kubernetes API holding pvcs.
+// machineSecrets are the CSI secrets of a complete machine identity whose signing key is key.
+func machineSecrets(key string) map[string]string {
+	return map[string]string{
+		identity.ClientKeyFile: key, identity.AgeKeyFile: "AGE-SECRET-KEY-1", identity.MachineFile: `{"version":1}`,
+	}
+}
+
+// identityDir writes an identity directory, as the driver's Secret mounted, from secrets.
+func identityDir(t *testing.T, secrets map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, v := range secrets {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(v), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	return dir
+}
+
+// controller returns a ControllerServer running the fake CLI with the default identity "default",
+// and a fake Kubernetes API holding pvcs and the namespace team-a.
 func (f *fakeRetyc) controller(pvcs ...*corev1.PersistentVolumeClaim) *ControllerServer {
-	kube := fake.NewClientset()
+	kube := fake.NewClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-a", UID: "uid-team-a"}})
 	for _, pvc := range pvcs {
 		if _, err := kube.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(
 			context.Background(), pvc, metav1.CreateOptions{}); err != nil {
@@ -92,9 +117,10 @@ func (f *fakeRetyc) controller(pvcs ...*corev1.PersistentVolumeClaim) *Controlle
 	}
 
 	return &ControllerServer{
-		Retyc: retycclient.New(filepath.Join(f.dir, "retyc"),
-			[]string{"RETYC_TOKEN=default", "RETYC_KEY_PASSPHRASE=pass"}),
-		Kube: kube,
+		Retyc:       retycclient.New(filepath.Join(f.dir, "retyc"), []string{"RETYC_TOKEN=inherited"}),
+		IdentityDir: identityDir(f.t, machineSecrets("default")),
+		Kube:        kube,
+		Events:      record.NewFakeRecorder(100),
 	}
 }
 
@@ -160,7 +186,7 @@ func TestCreateVolume_TenantSecretsAndDefaultVersioning(t *testing.T) {
 	f := newFakeRetyc(t)
 	s := f.controller(claim(map[string]string{AnnotationUID: "0", AnnotationGID: "0"}))
 	req := createRequest()
-	req.Secrets = map[string]string{"RETYC_TOKEN": "tenant", "RETYC_KEY_PASSPHRASE": "p"}
+	req.Secrets = machineSecrets("tenant")
 
 	if _, err := s.CreateVolume(context.Background(), req); err != nil {
 		t.Fatal(err)
@@ -364,7 +390,7 @@ func TestControllerExpandVolume(t *testing.T) {
 	resp, err := s.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
 		VolumeId:      "dr-1",
 		CapacityRange: &csi.CapacityRange{RequiredBytes: 20 << 30},
-		Secrets:       map[string]string{"RETYC_TOKEN": "tenant", "RETYC_KEY_PASSPHRASE": "p"},
+		Secrets:       machineSecrets("tenant"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -437,8 +463,8 @@ func TestCLIErrorKinds(t *testing.T) {
 	f.set("ls.err", `{"error":"not logged in: run retyc auth login","kind":"auth_required"}`)
 	_, err := f.controller(ok).CreateVolume(context.Background(), createRequest())
 	wantCode(t, err, codes.FailedPrecondition)
-	if !strings.Contains(err.Error(), "RETYC_TOKEN") {
-		t.Fatalf("error = %v, want a hint on the token", err)
+	if !strings.Contains(err.Error(), "Organization > Machines") {
+		t.Fatalf("error = %v, want a hint on the machine account", err)
 	}
 	f = newFakeRetyc(t)
 	f.set("quota.err", `{"error":"API error 426: upgrade","kind":"cli_too_old","status":426}`)
@@ -519,7 +545,7 @@ func TestControllerExpandVolume_AlreadyReserved(t *testing.T) {
 
 func TestControllerUpdates_TenantSecrets(t *testing.T) {
 	ctx := context.Background()
-	partial := map[string]string{"RETYC_TOKEN": "tenant"}
+	partial := map[string]string{"RETYC_TOKEN": "tenant"} // a former token secret
 	expand := func(s *ControllerServer, secrets map[string]string) error {
 		_, err := s.ControllerExpandVolume(ctx, &csi.ControllerExpandVolumeRequest{
 			VolumeId: "dr-1", CapacityRange: &csi.CapacityRange{RequiredBytes: 1 << 30}, Secrets: secrets,
@@ -544,7 +570,7 @@ func TestControllerUpdates_TenantSecrets(t *testing.T) {
 
 			// No secrets and no default identity: nothing to authenticate with.
 			s := f.controller()
-			s.Retyc.Env = nil
+			s.IdentityDir = t.TempDir()
 			wantCode(t, op(s, nil), codes.FailedPrecondition)
 
 			if got := f.calls(); len(got) != 0 {
@@ -659,5 +685,50 @@ func TestIsSupportedCapability_AccessModes(t *testing.T) {
 	}
 	if isSupportedCapability(block) {
 		t.Error("block volume accepted")
+	}
+}
+
+// A claim of a tenant class (provisioner-secret-name) whose request carries empty secrets is
+// refused, never created with the driver's identity; a plain class, or secrets, go through.
+func TestCreateVolume_TenantClassWithoutSecrets(t *testing.T) {
+	f := newFakeRetyc(t)
+	class := "tenant"
+	pvc := claim(map[string]string{AnnotationUID: "1000"})
+	pvc.Spec.StorageClassName = &class
+	s := f.controller(pvc)
+	ctx := context.Background()
+	mkClass := func(params map[string]string) {
+		t.Helper()
+		sc := &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: class}, Provisioner: DriverName, Parameters: params}
+		if _, err := s.Kube.StorageV1().StorageClasses().Create(ctx, sc, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Class not found: nothing to check.
+	if _, err := s.CreateVolume(ctx, createRequest()); err != nil {
+		t.Fatalf("class not found: %v", err)
+	}
+
+	mkClass(map[string]string{providerSecretParam: "creds"})
+	before := len(f.calls())
+	for _, secrets := range []map[string]string{nil, {}} {
+		req := createRequest()
+		req.Secrets = secrets
+		_, err := s.CreateVolume(ctx, req)
+		wantCode(t, err, codes.FailedPrecondition)
+		if !strings.Contains(err.Error(), "tenant class") {
+			t.Fatalf("error = %v", err)
+		}
+	}
+	if n := len(f.calls()); n != before {
+		t.Fatalf("the CLI ran %d times for a refused request", n-before)
+	}
+
+	// With the tenant's secrets: accepted.
+	req := createRequest()
+	req.Secrets = machineSecrets("tenant-key")
+	if _, err := s.CreateVolume(ctx, req); err != nil {
+		t.Fatalf("with secrets: %v", err)
 	}
 }

@@ -2,30 +2,59 @@
 
   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
 
-The controller pods must be 3/3 Running, the node pods 2/2. A driver container that is not ready explains why on /readyz and in its logs.
+The controller pods must be 3/3 Running, the node pods 2/2, the enroller 1/1, approved identities or not. A driver
+container that is not ready is starting or exiting: see its logs.
 Each staged volume runs a mount pod in this namespace, on the node that mounts it:
 
   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/name=retycfs-mount -L csi.retycfs.com/pvc,csi.retycfs.com/node
 
-WARNING: the mount pods are privileged (RetycFS, mount propagation). The namespace {{ .Release.Namespace }} must allow it, e.g.
+WARNING: the mount pods are privileged (RetycFS, mount propagation). The namespace {{ .Release.Namespace }} must allow it:
   kubectl label namespace {{ .Release.Namespace }} pod-security.kubernetes.io/enforce=privileged
-(kube-system usually does.)
+{{- if eq .Release.Namespace "kube-system" }}
 
-{{- $secret := include "retycfs-csi.credentialsSecretName" . }}
-{{- if $secret }}
+WARNING: installed in kube-system. The identities' Secrets (every machine account's keys) live in the release namespace:
+whoever reads Secrets in kube-system reads them, and kube-system usually has many such readers. Install the driver in a
+namespace of its own (retycfs-system).
+{{- end }}
 
-Cluster-wide identity: Secret "{{ $secret }}".
+Retyc identities are machine accounts: the enroller requests one per RetycIdentity, and an administrator of the Retyc
+organization approves it (Organization > Machines) after checking that its fingerprint is the one shown here:
+
+  kubectl get retycidentity -A
+  kubectl -n <namespace> get retycidentity default -o wide
+
+With -o wide, the Approval column is the link to the request. A tenant namespace asks for its own identity, for the tenant classes,
+with this RetycIdentity (kubectl -n <namespace> apply -f):
+
+  apiVersion: csi.retycfs.com/v1alpha1
+  kind: RetycIdentity
+  metadata:
+    name: default
+  {{- if not .Values.identity.organizationID }}
+  spec:
+    organizationID: <Retyc organization UUID>
+  {{- end }}
+{{- if .Values.identity.organizationID }}
+
+Cluster-wide identity: RetycIdentity "default" of {{ .Release.Namespace }} (organization {{ .Values.identity.organizationID }}), created
+by the enroller, Secret "{{ include "retycfs-csi.identitySecretName" . }}". The pods are ready without it; the claims of the
+cluster-wide classes stay Pending until it is approved:
+
+  kubectl -n {{ .Release.Namespace }} get retycidentity default -o wide
+
+Deleting it enrolls a new machine (a new request to approve); the old one stays in Retyc until disabled there.
+Changing identity.organizationID later does not move it: delete it to enroll in the new organization.
 {{- else }}
 
-WARNING: no cluster-wide identity (credentials.token or credentials.existingSecret): the StorageClasses without a
-tenantSecretName are not installed, and only per-namespace identities are served.
+No cluster-wide identity (identity.organizationID is empty): the StorageClasses without tenant: true are not installed,
+and only the tenants' identities are served.
 {{- end }}
 {{- $classes := include "retycfs-csi.storageClassNames" . | fromJsonArray }}
 
 StorageClasses:
 {{- range .Values.storageClasses }}
 {{- if has .name $classes }}
-  - {{ .name }}: reclaimPolicy {{ .reclaimPolicy | default "Delete" }}{{ if .tenantSecretName }}, identity from Secret "{{ .tenantSecretName }}" in the claim's namespace{{ else }}, cluster-wide identity{{ end }}
+  - {{ .name }}: reclaimPolicy {{ .reclaimPolicy | default "Delete" }}{{ if .tenant }}, identity of the claim's namespace (its RetycIdentity){{ else }}, cluster-wide identity{{ end }}
 {{- else }}
   - {{ .name }}: not installed (needs the cluster-wide identity)
 {{- end }}

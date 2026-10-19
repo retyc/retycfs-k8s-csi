@@ -314,9 +314,9 @@ func TestRecoverGaveUpReportedOnce(t *testing.T) {
 	e.publish(e.target)
 	e.mnt.kill(dev)
 	for range 3 {
-		e.exit(77, "token revoked")
+		e.exit(77, "machine refused")
 		e.s.Recover(context.Background())
-		e.advance(10 * time.Minute)
+		e.advance(4 * time.Minute) // under mountpod.GiveUpRetryAfter in all
 		e.s.Recover(context.Background())
 	}
 	if n := strings.Count(strings.Join(e.eventList(), "\n"), reasonMountGaveUp); n != 1 {

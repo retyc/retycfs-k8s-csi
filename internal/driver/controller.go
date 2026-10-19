@@ -5,13 +5,17 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
 	"github.com/retyc/retycfs-k8s-csi/internal/identity"
@@ -23,31 +27,42 @@ import (
 // identified by the dataroom ID (the volume handle).
 type ControllerServer struct {
 	csi.UnimplementedControllerServer
-	// Retyc runs the CLI with the driver's own environment — the cluster-wide default identity,
-	// if any. Requests carrying CSI secrets (StorageClass secret parameters) get a per-call
-	// client with those credentials instead.
+	// Retyc runs the CLI with the driver's environment and no identity: each request gets a copy
+	// that runs as its identity (see client).
 	Retyc *retycclient.Client
-	// Kube reads the claim behind a CreateVolume request (its annotations). In-cluster client in
-	// production, k8s.io/client-go/kubernetes/fake in tests.
+	// IdentityDir holds the driver's default identity (its Secret, mounted), read at each request
+	// that carries no CSI secrets.
+	IdentityDir string
+	// Kube reads the claim behind a CreateVolume request (its annotations) and the namespace of a
+	// tenant identity. In-cluster client in production, k8s.io/client-go/kubernetes/fake in tests.
 	Kube kubernetes.Interface
+	// Events records on the claims what their owners must know (initial members); nil records
+	// nothing.
+	Events record.EventRecorder
+
+	// members tracks the detached additions of initial members (see addInitialMembers), so that
+	// tests can wait for them.
+	members sync.WaitGroup
 }
 
-// client picks the retyc client for a request: the tenant's credentials when the request carries
-// secrets, the default identity otherwise. Fails when neither exists.
-func (s *ControllerServer) client(secrets map[string]string) (*retycclient.Client, error) {
-	creds, err := identity.FromSecrets(secrets)
+// client returns the retyc client of a request, running as the tenant's identity when the request
+// carries secrets, the driver's default one otherwise (see resolveIdentity). namespace is the
+// claim's namespace, which a tenant identity must have been enrolled for; "" skips that check, for
+// the requests that do not name the claim (delete, expand, modify: the volume was created by then).
+func (s *ControllerServer) client(
+	ctx context.Context, secrets map[string]string, namespace string,
+) (*retycclient.Client, error) {
+	creds, err := resolveIdentity(secrets, s.IdentityDir, nil)
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, err
 	}
-	if creds != nil {
-		return s.Retyc.WithEnv(creds.EnvOverrides()), nil
-	}
-	if identity.FromEnv(s.Retyc.Env) == nil {
-		return nil, status.Error(codes.FailedPrecondition,
-			"no credentials: the request carried no secrets and the driver has no default identity")
+	if namespace != "" {
+		if err := checkIdentityNamespace(ctx, s.Kube, creds, namespace); err != nil {
+			return nil, err
+		}
 	}
 
-	return s.Retyc, nil
+	return s.Retyc.WithIdentity(creds), nil
 }
 
 func (s *ControllerServer) ControllerGetCapabilities(
@@ -200,11 +215,15 @@ func (s *ControllerServer) CreateVolume(
 	// Everything that can be refused is checked before anything is created on the Retyc side:
 	// the claim and its owner annotation first.
 	pvcName, pvcNamespace := req.GetParameters()[pvcNameParameter], req.GetParameters()[pvcNamespaceParameter]
-	if err := s.checkClaim(ctx, pvcNamespace, pvcName); err != nil {
+	pvc, members, err := s.checkClaim(ctx, pvcNamespace, pvcName)
+	if err != nil {
 		return nil, err
 	}
 
-	retyc, err := s.client(req.GetSecrets())
+	if err := s.checkTenantSecrets(ctx, pvc, req.GetSecrets()); err != nil {
+		return nil, err
+	}
+	retyc, err := s.client(ctx, req.GetSecrets(), pvcNamespace)
 	if err != nil {
 		return nil, err
 	}
@@ -234,6 +253,12 @@ func (s *ControllerServer) CreateVolume(
 				}
 			}
 			klog.Infof("CreateVolume: reusing existing dataroom %q for volume %q", dr.ID, name)
+			if len(members) > 0 {
+				// Members are added by the call that creates the dataroom only (see addInitialMembers),
+				// possibly still running: nothing to report here, it reports its own failures.
+				s.event(pvc, corev1.EventTypeNormal, reasonInitialMembers, "Dataroom %s of volume %s already exists: "+
+					"its initial members (%s) are managed by the attempt that created it", dr.ID, name, AnnotationInitialMembers)
+			}
 
 			return createVolumeResponse(dr.ID, reserved, pvcName, pvcNamespace), nil
 		}
@@ -261,32 +286,153 @@ func (s *ControllerServer) CreateVolume(
 		return nil, apiError(err, "creating dataroom for volume %q", name)
 	}
 	klog.Infof("CreateVolume: created dataroom %q for volume %q (%d bytes)", result.ID, name, capacity)
+	s.startInitialMembers(ctx, retyc, pvc, result.ID, members)
 
 	return createVolumeResponse(result.ID, capacity, pvcName, pvcNamespace), nil
 }
 
-// checkClaim reads the claim a volume is provisioned for and validates its owner annotations.
-func (s *ControllerServer) checkClaim(ctx context.Context, namespace, name string) error {
+// providerSecretParam is the StorageClass parameter that gives its volumes provisioner secrets: the
+// chart sets it on the tenant classes, whose volumes must never be created with the driver's own
+// identity.
+const providerSecretParam = kubernetesParameterPrefix + //nolint:gosec // G101: a parameter name
+	"provisioner-secret-name"
+
+// checkTenantSecrets refuses, with FailedPrecondition, a request of a tenant class (one with
+// providerSecretParam) that carries no credentials: an empty or missing Secret must never fall back
+// to the driver's identity. Incomplete credentials are refused by client. A class not found does not
+// refuse (nothing to check); an API error is Unavailable.
+func (s *ControllerServer) checkTenantSecrets(
+	ctx context.Context, pvc *corev1.PersistentVolumeClaim, secrets map[string]string,
+) error {
+	class := pvc.Spec.StorageClassName
+	if class == nil || *class == "" {
+		return nil
+	}
+	creds, err := identity.FromSecrets(secrets)
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "CSI secrets: %v", err)
+	}
+	if creds != nil {
+		return nil
+	}
+	sc, err := s.Kube.StorageV1().StorageClasses().Get(ctx, *class, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		klog.Warningf("CreateVolume: StorageClass %s of claim %s/%s not found, not checked", *class, pvc.Namespace,
+			pvc.Name)
+
+		return nil
+	}
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "reading StorageClass %s: %v", *class, err)
+	}
+	if _, tenant := sc.Parameters[providerSecretParam]; tenant {
+		return status.Errorf(codes.FailedPrecondition, "StorageClass %s is a tenant class (%s) but the request "+
+			"carries no credentials (empty or missing Secret): the driver's own identity is not used for it",
+			*class, providerSecretParam)
+	}
+
+	return nil
+}
+
+// checkClaim reads the claim a volume is provisioned for, validates its owner annotations and
+// returns it with its initial members.
+func (s *ControllerServer) checkClaim(
+	ctx context.Context, namespace, name string,
+) (*corev1.PersistentVolumeClaim, []member, error) {
 	if namespace == "" || name == "" {
-		return status.Errorf(codes.InvalidArgument,
+		return nil, nil, status.Errorf(codes.InvalidArgument,
 			"parameters %s and %s are required (csi-provisioner --extra-create-metadata)",
 			pvcNameParameter, pvcNamespaceParameter)
 	}
 	if s.Kube == nil {
-		return status.Error(codes.FailedPrecondition, "no Kubernetes client: cannot read the claim")
+		return nil, nil, status.Error(codes.FailedPrecondition, "no Kubernetes client: cannot read the claim")
 	}
 	pvc, err := s.Kube.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return status.Errorf(codes.NotFound, "claim %s/%s not found", namespace, name)
+		return nil, nil, status.Errorf(codes.NotFound, "claim %s/%s not found", namespace, name)
 	}
 	if err != nil {
-		return status.Errorf(codes.Unavailable, "reading claim %s/%s: %v", namespace, name, err)
+		return nil, nil, status.Errorf(codes.Unavailable, "reading claim %s/%s: %v", namespace, name, err)
 	}
 	if _, _, err := claimOwner(pvc.GetAnnotations()); err != nil {
-		return status.Errorf(codes.InvalidArgument, "claim %s/%s: %v", namespace, name, err)
+		return nil, nil, status.Errorf(codes.InvalidArgument, "claim %s/%s: %v", namespace, name, err)
+	}
+	members, err := parseInitialMembers(pvc.GetAnnotations())
+	if err != nil {
+		return nil, nil, status.Errorf(codes.InvalidArgument, "claim %s/%s: %v", namespace, name, err)
 	}
 
-	return nil
+	return pvc, members, nil
+}
+
+// Event reasons, on the claim of the volume.
+const (
+	reasonInitialMembers = "InitialMembers"
+	reasonNoAdmin        = "NoHumanAdmin"
+)
+
+// initialMembersTimeout bounds the additions of the initial members, each a CLI call with a rekey.
+// The controller pod's terminationGracePeriodSeconds covers it (see Wait).
+const initialMembersTimeout = 5 * time.Minute
+
+// Wait returns once the additions of initial members still running are done: the process calls it
+// before exiting, so that a rollout right after a CreateVolume does not drop them. Each is bounded
+// by initialMembersTimeout.
+func (s *ControllerServer) Wait() {
+	s.members.Wait()
+}
+
+// startInitialMembers runs addInitialMembers in the background, so that CreateVolume answers right
+// after the creation instead of holding the provisioner (whose timeout would make it retry).
+func (s *ControllerServer) startInitialMembers(
+	ctx context.Context, retyc *retycclient.Client, pvc *corev1.PersistentVolumeClaim, id string, members []member,
+) {
+	// Detached from the request, which ends with the response.
+	ctx = context.WithoutCancel(ctx)
+	s.members.Go(func() { s.addInitialMembers(ctx, retyc, pvc, id, members) })
+}
+
+// addInitialMembers adds the claim's initial members to the dataroom just created, once: a failure
+// does not fail the volume, whose dataroom exists, and is not retried, but reported on the claim
+// (whoever owns the claim adds the members by hand). Only the call that creates the dataroom adds
+// them, never a retry that finds it, so that they are never added again in a loop; and they run
+// in the background, detached from the request, so that the provisioner giving up on a slow call does not cut them
+// short. With no admin added, the machine alone can transfer the dataroom: that is reported too.
+func (s *ControllerServer) addInitialMembers(
+	ctx context.Context, retyc *retycclient.Client, pvc *corev1.PersistentVolumeClaim, id string, members []member,
+) {
+	ctx, cancel := context.WithTimeout(ctx, initialMembersTimeout)
+	defer cancel()
+	var failed []string
+	admins := 0
+	for _, m := range members {
+		if err := retyc.AddMember(ctx, id, m.Email, m.Role); err != nil {
+			klog.Warningf("CreateVolume: dataroom %q: adding %s as %s: %v", id, m.Email, m.Role, err)
+			failed = append(failed, fmt.Sprintf("%s as %s (%v)", m.Email, m.Role, err))
+
+			continue
+		}
+		klog.Infof("CreateVolume: dataroom %q: added %s as %s", id, m.Email, m.Role)
+		if m.Role == roleAdmin {
+			admins++
+		}
+	}
+	if len(failed) > 0 {
+		s.event(pvc, corev1.EventTypeWarning, reasonInitialMembers, "Dataroom %s: could not add %s; the driver does "+
+			"not retry: add them with `retyc dataroom user add`", id, strings.Join(failed, ", "))
+	}
+	if admins == 0 {
+		s.event(pvc, corev1.EventTypeWarning, reasonNoAdmin, "Dataroom %s has no human admin (annotation %s): it can "+
+			"only be transferred while its machine account is active", id, AnnotationInitialMembers)
+	}
+}
+
+// event records an event on a claim; a no-op without a recorder or a claim.
+func (s *ControllerServer) event(pvc *corev1.PersistentVolumeClaim, eventType, reason, format string, args ...any) {
+	if s.Events == nil || pvc == nil {
+		return
+	}
+	s.Events.Eventf(pvc, eventType, reason, format, args...)
 }
 
 // createVolumeResponse builds the CSI response for a dataroom. The requested capacity is the
@@ -312,7 +458,7 @@ func (s *ControllerServer) DeleteVolume(
 		return nil, status.Error(codes.InvalidArgument, "volume ID is required")
 	}
 
-	retyc, err := s.client(req.GetSecrets())
+	retyc, err := s.client(ctx, req.GetSecrets(), "")
 	if err != nil {
 		return nil, err
 	}
@@ -353,7 +499,7 @@ func (s *ControllerServer) ControllerExpandVolume(
 		return nil, err
 	}
 
-	retyc, err := s.client(req.GetSecrets())
+	retyc, err := s.client(ctx, req.GetSecrets(), "")
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +551,7 @@ func (s *ControllerServer) ControllerModifyVolume(
 		return &csi.ControllerModifyVolumeResponse{}, nil
 	}
 
-	retyc, err := s.client(req.GetSecrets())
+	retyc, err := s.client(ctx, req.GetSecrets(), "")
 	if err != nil {
 		return nil, err
 	}
@@ -431,10 +577,10 @@ func updateError(id string, err error) error {
 //   - no storage left (plan_exceeded, storage_exceeded): ResourceExhausted;
 //   - a reservation that cannot be shrunk or is below the minimum: OutOfRange;
 //   - any other validation error (invalid): InvalidArgument;
-//   - the login refused (auth_required, unauthenticated), the key passphrase (config), this CLI
-//     refused as too old (cli_too_old): FailedPrecondition, with what to fix. Not Unauthenticated:
-//     in gRPC it says the RPC's caller is not authenticated, and here the sidecar's call is fine,
-//     it is the identity in the CSI secrets (or the driver's own) that the Retyc API refuses;
+//   - the machine account refused (exit code 77), its configuration refused (78), this CLI refused
+//     as too old (cli_too_old): FailedPrecondition, with what to fix. Not Unauthenticated: in gRPC
+//     it says the RPC's caller is not authenticated, and here the sidecar's call is fine, it is the
+//     identity in the CSI secrets (or the driver's own) that Retyc refuses;
 //   - the API's 403 (forbidden): PermissionDenied;
 //   - the API's rate limit (rate_limited): Unavailable, which the sidecars retry with a backoff;
 //   - the rest: Internal.
@@ -447,13 +593,14 @@ func apiError(err error, format string, args ...any) error {
 		code = codes.OutOfRange
 	case retycclient.IsValidation(err):
 		code = codes.InvalidArgument
-	case retycclient.IsUnauthenticated(err):
+	case retycclient.IsMachineRefused(err):
 		code, hint = codes.FailedPrecondition,
-			" (the Retyc login is missing, expired or revoked: renew RETYC_TOKEN in the CSI secrets, "+
-				"or in the driver's own Secret without them)"
+			" (the machine account is disabled or deleted on the Retyc side: enable it again in Organization > "+
+				"Machines, or recreate the RetycIdentity)"
 	case retycclient.IsConfig(err):
 		code, hint = codes.FailedPrecondition,
-			" (RETYC_KEY_PASSPHRASE is missing or wrong in the CSI secrets, or in the driver's own Secret without them)"
+			" (the machine account's configuration is refused: its AGE key is not the account's active key, a "+
+				"file of it is readable by others, or RETYC_TOKEN/RETYC_KEY_PASSPHRASE are set alongside it)"
 	case retycclient.IsCLITooOld(err):
 		code, hint = codes.FailedPrecondition,
 			" (the Retyc API refuses the retyc CLI of the driver image as too old: upgrade the driver)"

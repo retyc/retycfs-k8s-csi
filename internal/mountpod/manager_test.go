@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -79,13 +80,21 @@ func testSpec() *Spec {
 	return &Spec{
 		VolumeID: "dr-1", NodeName: "node-a", PVCName: "data", PVCNamespace: "team",
 		StagingPath: testStaging,
-		Credentials: identity.Credentials{Token: "tok", Passphrase: "pass"},
+		Credentials: testCredentials("key"),
 		UID:         1000, GID: 2000,
 		Options: Options{CacheTTL: 30 * time.Second, ReadOnly: true, LocalFile: []string{"*.tmp"}},
 		Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
 			corev1.ResourceMemory: resource.MustParse("1Gi"), corev1.ResourceCPU: resource.MustParse("1"),
 		}},
 	}
+}
+
+// testCredentials is a complete machine identity whose signing key is key.
+func testCredentials(key string) identity.Credentials {
+	return identity.Credentials{Files: map[string][]byte{
+		identity.ClientKeyFile: []byte(key), identity.AgeKeyFile: []byte("age"),
+		identity.MachineFile: []byte(`{"version":1}`), identity.K8sFile: []byte(`{"mode":"cluster"}`),
+	}}
 }
 
 func (e *env) ensure(spec *Spec) State {
@@ -262,12 +271,16 @@ func TestEnsureCreatesPodAndSecret(t *testing.T) {
 	if !strings.HasPrefix(secretName, pod.Name+"-") {
 		t.Fatalf("secret name = %q", secretName)
 	}
-	for _, k := range []string{identity.TokenKey, identity.PassphraseKey, secretRedisURL} {
-		if ref := envs[k].ValueFrom; ref == nil || ref.SecretKeyRef.Name != secretName || ref.SecretKeyRef.Key != k {
-			t.Errorf("env %s = %+v", k, envs[k].ValueFrom)
+	if ref := envs[secretRedisURL].ValueFrom; ref == nil || ref.SecretKeyRef.Name != secretName ||
+		ref.SecretKeyRef.Key != secretRedisURL {
+		t.Errorf("env %s = %+v", secretRedisURL, envs[secretRedisURL].ValueFrom)
+	}
+	for _, k := range []string{"RETYC_TOKEN", "RETYC_KEY_PASSPHRASE", "RETYC_KEYRING_ENABLED"} {
+		if _, ok := envs[k]; ok {
+			t.Errorf("env %s must not be set in machine mode", k)
 		}
 	}
-	if envs[identity.KeyringEnabledKey].Value != "false" || envs[identity.ConfigDirKey].Value != "/config" ||
+	if envs[identity.MachineDirKey].Value != "/machine" || envs["RETYC_CONFIG_DIR"].Value != "/config" ||
 		envs["RETYC_INSECURE"].Value != "true" {
 		t.Errorf("env names = %v", slices.Collect(func(yield func(string) bool) {
 			for k := range envs {
@@ -283,12 +296,31 @@ func TestEnsureCreatesPodAndSecret(t *testing.T) {
 		*m.MountPropagation != corev1.MountPropagationBidirectional {
 		t.Errorf("staging mount = %+v", m)
 	}
+	if m := mounts["machine"]; m.MountPath != "/machine" || !m.ReadOnly {
+		t.Errorf("machine mount = %+v", m)
+	}
 	hostPaths := map[string]string{}
 	for _, v := range ps.Volumes {
-		if v.HostPath != nil {
+		switch {
+		case v.HostPath != nil:
 			hostPaths[v.Name] = v.HostPath.Path
-		} else if v.EmptyDir == nil {
-			t.Errorf("volume %s is neither hostPath nor emptyDir", v.Name)
+		case v.Secret != nil:
+			// The identity files only, owner read only: the CLI refuses a file others can read, and
+			// the container runs as root.
+			sv := v.Secret
+			var keys []string
+			for _, it := range sv.Items {
+				if it.Key != it.Path {
+					t.Errorf("item %+v must keep its name", it)
+				}
+				keys = append(keys, it.Key)
+			}
+			if v.Name != "machine" || sv.SecretName != secretName || sv.DefaultMode == nil || *sv.DefaultMode != 0o400 ||
+				strings.Join(keys, " ") != "client.key age.key machine.json" {
+				t.Errorf("secret volume %s = %+v, items %v", v.Name, sv, keys)
+			}
+		case v.EmptyDir == nil:
+			t.Errorf("volume %s is neither hostPath, secret nor emptyDir", v.Name)
 		}
 	}
 	want := map[string]string{
@@ -301,9 +333,10 @@ func TestEnsureCreatesPodAndSecret(t *testing.T) {
 	}
 
 	secret := e.secret(secretName)
-	if string(secret.Data[identity.TokenKey]) != "tok" || string(secret.Data[identity.PassphraseKey]) != "pass" ||
+	if string(secret.Data[identity.ClientKeyFile]) != "key" || string(secret.Data[identity.AgeKeyFile]) != "age" ||
+		string(secret.Data[identity.MachineFile]) != `{"version":1}` || len(secret.Data) != 4 ||
 		string(secret.Data[secretRedisURL]) != spec.Cache.RedisURL {
-		t.Error("secret data mismatch")
+		t.Errorf("secret data keys = %v", slices.Sorted(maps.Keys(secret.Data)))
 	}
 	if len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].UID != pod.UID ||
 		secret.OwnerReferences[0].Kind != "Pod" {
@@ -340,7 +373,7 @@ func TestEnsureIdempotentAndConfigChange(t *testing.T) {
 
 	for name, change := range map[string]func(*Spec){
 		"uid":         func(s *Spec) { s.UID = 0 },
-		"credentials": func(s *Spec) { s.Credentials.Token = "other" },
+		"credentials": func(s *Spec) { s.Credentials = testCredentials("other") },
 		"options":     func(s *Spec) { s.Options.BackgroundDelete = true },
 		"resources":   func(s *Spec) { s.Resources = corev1.ResourceRequirements{} },
 	} {
@@ -365,7 +398,7 @@ func TestEnsureValidates(t *testing.T) {
 	e := newEnv(t)
 	for i, change := range []func(*Spec){
 		func(s *Spec) { s.VolumeID = "../x" }, func(s *Spec) { s.NodeName = "" },
-		func(s *Spec) { s.Credentials.Passphrase = "" },
+		func(s *Spec) { delete(s.Credentials.Files, identity.MachineFile) },
 		func(s *Spec) { s.StagingPath = "" }, func(s *Spec) { s.StagingPath = "relative/globalmount" },
 		func(s *Spec) { s.StagingPath = "/var/lib/kubelet/plugins/globalmount" },
 		func(s *Spec) { s.StagingPath = "/etc/x/globalmount" },
@@ -545,6 +578,8 @@ func TestFailedPodWithoutContainerStatus(t *testing.T) {
 
 func TestBackoffGivesUpOnFatalExits(t *testing.T) {
 	e := newEnv(t)
+	// The default gives up at once (see TestBackoffGivesUpAtOnce): three tries exercise the count.
+	e.m.cfg.MaxFatalExits = 3
 	spec := testSpec()
 	st := e.ensure(spec)
 	ctx := context.Background()
@@ -572,7 +607,7 @@ func TestBackoffGivesUpOnFatalExits(t *testing.T) {
 		st = next
 	}
 
-	e.exit(st.Name, ExitAuthRequired, time.Second)
+	e.exit(st.Name, ExitConfig, time.Second) // a 78 never expires (see TestGiveUpOn77Expires)
 	if st, err := e.m.Ensure(ctx, spec); !errors.Is(err, ErrGaveUp) || !st.Backoff.GaveUp || st.Phase != PhaseExited {
 		t.Fatalf("third fatal exit: phase = %s, %v", st.Phase, err)
 	}
@@ -589,10 +624,80 @@ func TestBackoffGivesUpOnFatalExits(t *testing.T) {
 	}
 
 	// New credentials: a new config, a fresh backoff and a new pod right away.
-	spec.Credentials.Token = "new"
+	spec.Credentials = testCredentials("new")
 	st = e.ensure(spec)
 	if st.Phase != PhasePending || st.Backoff != (Backoff{}) {
 		t.Fatalf("new credentials: phase = %s, backoff = %+v", st.Phase, st.Backoff)
+	}
+}
+
+// A 77 or a 78 gives up at once by default: a machine refused, or misconfigured, is not retried.
+func TestBackoffGivesUpAtOnce(t *testing.T) {
+	for _, code := range []int32{ExitAuthRequired, ExitConfig} {
+		e := newEnv(t)
+		spec := testSpec()
+		st := e.ensure(spec)
+		e.exit(st.Name, code, time.Second)
+		st, err := e.m.Ensure(context.Background(), spec)
+		if !errors.Is(err, ErrGaveUp) || !st.Backoff.GaveUp || !strings.Contains(err.Error(), ExitMeaning(code)) {
+			t.Errorf("exit %d: %+v, %v", code, st.Backoff, err)
+		}
+	}
+	if !strings.Contains(ExitMeaning(ExitAuthRequired), "Organization > Machines") {
+		t.Errorf("77 must say how to enable the machine again: %q", ExitMeaning(ExitAuthRequired))
+	}
+}
+
+// A give-up on a 77 expires GiveUpRetryAfter after the exit, however often it is looked at, for one
+// try; refused again, it gives up for as long again. A 78 does not expire.
+func TestGiveUpOn77Expires(t *testing.T) {
+	e := newEnv(t)
+	spec := testSpec()
+	ctx := context.Background()
+	st := e.ensure(spec)
+	e.exit(st.Name, ExitAuthRequired, time.Second)
+	_, err := e.m.Ensure(ctx, spec)
+	if !errors.Is(err, ErrGaveUp) || !strings.Contains(err.Error(), "automatically") {
+		t.Fatalf("first 77: %v", err)
+	}
+	until := e.now.Add(GiveUpRetryAfter)
+
+	// Retries do not extend it.
+	for range 3 {
+		e.now = e.now.Add(GiveUpRetryAfter / 4)
+		if e.now.Before(until) {
+			if st, err := e.m.Ensure(ctx, spec); !errors.Is(err, ErrGaveUp) || st.Backoff.GiveUpUntil != until {
+				t.Fatalf("before the expiry: %+v, %v", st.Backoff, err)
+			}
+		}
+	}
+	e.now = until
+	st = e.ensure(spec)
+	if st.Phase != PhasePending || st.Backoff.GaveUp {
+		t.Fatalf("after the expiry: phase = %s, backoff = %+v; want one new try", st.Phase, st.Backoff)
+	}
+
+	// Refused again: gives up again, for a full period from the new exit.
+	e.exit(st.Name, ExitAuthRequired, time.Second)
+	if _, err := e.m.Ensure(ctx, spec); !errors.Is(err, ErrGaveUp) {
+		t.Fatalf("second 77: %v", err)
+	}
+	e.now = e.now.Add(GiveUpRetryAfter - time.Second)
+	if _, err := e.m.Ensure(ctx, spec); !errors.Is(err, ErrGaveUp) {
+		t.Fatalf("a second give-up must last a full period: %v", err)
+	}
+
+	// A 78 stays.
+	e = newEnv(t)
+	st = e.ensure(spec)
+	e.exit(st.Name, ExitConfig, time.Second)
+	_, err = e.m.Ensure(ctx, spec)
+	if !errors.Is(err, ErrGaveUp) || !strings.Contains(err.Error(), "fix the configuration") {
+		t.Fatalf("78: %v", err)
+	}
+	e.now = e.now.Add(24 * time.Hour)
+	if _, err := e.m.Ensure(ctx, spec); !errors.Is(err, ErrGaveUp) {
+		t.Fatalf("a 78 must not expire: %v", err)
 	}
 }
 
@@ -601,6 +706,7 @@ func TestBackoffResets(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer srv.Close()
 	e.m.cfg.MetricsPort = serverPort(t, srv)
+	e.m.cfg.MaxFatalExits = 3 // to see the count of fatal exits reset
 	spec := testSpec()
 	st := e.ensure(spec)
 	restart := func(code int32, ran time.Duration) Backoff {
@@ -850,10 +956,11 @@ func TestLostWrites(t *testing.T) {
 		{"everything sent", exited(ExitFailed, corev1.ConditionFalse, later, "drain over after 1s: everything was sent"),
 			false, "failed after it was ready"},
 		// A login lost with the writes keeps 77.
-		{"77 lost writes", exited(ExitAuthRequired, corev1.ConditionFalse, later, lost), true, "authentication required"},
+		{"77 lost writes", exited(ExitAuthRequired, corev1.ConditionFalse, later, lost), true, "machine disabled"},
 		{"77", exited(ExitAuthRequired, corev1.ConditionFalse, later, "Error: login lost"), false,
-			"authentication required"},
-		{"78 with the words", exited(ExitConfig, corev1.ConditionFalse, created, lost), false, "key passphrase"},
+			"machine disabled"},
+		{"78 with the words", exited(ExitConfig, corev1.ConditionFalse, created, lost), false,
+			"machine account configuration"},
 	} {
 		if got := LostWrites(tc.st); got != tc.want {
 			t.Errorf("%s: LostWrites = %t, want %t", tc.name, got, tc.want)

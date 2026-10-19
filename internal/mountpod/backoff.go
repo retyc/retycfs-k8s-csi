@@ -6,19 +6,20 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 )
 
 // Exit codes of `retyc fs mount` (sysexits.h, a stable contract of retyc-cli). 77 and 78 say a new
-// pod with the same credentials fails again; any other code may be transient (Retyc API or identity
-// provider unreachable), 75 included: the mount worked, a restart may.
+// pod with the same machine account fails again; any other code may be transient (Retyc API or
+// identity provider unreachable), 75 included: the mount worked, a restart may.
 const (
 	// ExitFailed is any other failure, a failure to start included (Redis unreachable, a mount point
 	// left dead). A CLI older than ExitWritesLost also exits with it when writes were lost: see
 	// LostWrites.
 	ExitFailed       = 1
 	ExitWritesLost   = 75 // EX_TEMPFAIL: files being written, or background deletes, never reached the API
-	ExitAuthRequired = 77 // EX_NOPERM: the login cannot recover without a new token
-	ExitConfig       = 78 // EX_CONFIG: key passphrase missing or wrong
+	ExitAuthRequired = 77 // EX_NOPERM: the machine account is disabled or deleted on the Retyc side
+	ExitConfig       = 78 // EX_CONFIG: the machine account's configuration is refused
 )
 
 // ExitMeaning explains an exit code of `retyc fs mount`, or returns "" for 0 and unknown codes.
@@ -29,9 +30,11 @@ func ExitMeaning(code int32) string {
 	case ExitWritesLost:
 		return "writes lost: files being written could not be sent to the Retyc API"
 	case ExitAuthRequired:
-		return "authentication required: RETYC_TOKEN is missing, expired or revoked"
+		return "machine disabled or deleted on the Retyc side: enable it again (Organization > Machines) " +
+			"or recreate the RetycIdentity"
 	case ExitConfig:
-		return "key passphrase missing or wrong"
+		return "machine account configuration refused: its AGE key is not the account's active key, a file " +
+			"of it is readable by others, or RETYC_TOKEN/RETYC_KEY_PASSPHRASE are set alongside it"
 	}
 
 	return ""
@@ -118,10 +121,13 @@ type Backoff struct {
 	// NextRestart is when Ensure may create the next pod; zero when it may now.
 	NextRestart time.Time
 	// GaveUp is true after MaxFatalExits consecutive 77/78 exits. Delete keeps it (see forget);
-	// another config hash (new credentials), Forget (an explicit unstage, or the volume gone from
+	// another config hash (another identity), Forget (an explicit unstage, or the volume gone from
 	// the node), a deletion of the exited pod by hand (see startOver) or a node plugin restart
 	// clears it.
 	GaveUp bool
+	// GiveUpUntil is when a give-up on a 77 expires, for one more try (see GiveUpRetryAfter); zero
+	// for a give-up that never does (78).
+	GiveUpUntil time.Time
 }
 
 // backoffEntry is a Backoff tied to the config it was counted for and to the last pod seen exit,
@@ -170,7 +176,10 @@ func (m *Manager) recordExit(
 		e.FatalExits = 0
 	}
 	if e.FatalExits >= m.cfg.MaxFatalExits {
-		e.GaveUp, e.NextRestart = true, time.Time{}
+		e.GaveUp, e.NextRestart, e.GiveUpUntil = true, time.Time{}, time.Time{}
+		if code == ExitAuthRequired {
+			e.GiveUpUntil = m.now().Add(GiveUpRetryAfter)
+		}
 
 		return e.Backoff
 	}
@@ -186,8 +195,15 @@ func (m *Manager) recordExit(
 func (m *Manager) backoffState(volumeID, hash string) Backoff {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	e := m.backoff(volumeID, hash)
+	if e.GaveUp && !e.GiveUpUntil.IsZero() && !m.now().Before(e.GiveUpUntil) {
+		// Expired: one more try. If the machine is still refused, its pod exits with 77 and the
+		// give-up starts again for GiveUpRetryAfter.
+		klog.Infof("mountpod: volume %s: the give-up on code %d expired: trying again", volumeID, e.LastExitCode)
+		e.Backoff = Backoff{}
+	}
 
-	return m.backoff(volumeID, hash).Backoff
+	return e.Backoff
 }
 
 // resetBackoff records that the volume's pod was seen ready: the next failure starts a fresh backoff.

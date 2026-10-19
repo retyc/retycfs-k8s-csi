@@ -1,0 +1,124 @@
+# Enroller of the RetycIdentities: a single replica (no leader election), replaced rather than
+# rolled so that two never run the same enrollment. Non-root with a read-only root filesystem: the
+# CLI only writes in HOME and its 0700 temporary directories, both on the in-memory /tmp.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "retycfs-csi.fullname" . }}-enroller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+    app.kubernetes.io/component: enroller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "retycfs-csi.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: enroller
+  template:
+    metadata:
+      labels:
+        {{- include "retycfs-csi.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: enroller
+        {{- with .Values.enroller.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.enroller.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "retycfs-csi.enroller.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.enroller.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.enroller.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: retycfs-csi-enroller
+          image: {{ include "retycfs-csi.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --mode=enroller
+            - --http-endpoint=:{{ .Values.healthPort }}
+            {{- with .Values.identity.organizationID }}
+            - --default-organization-id={{ . }}
+            {{- end }}
+            - --cluster-name={{ .Values.identity.clusterName }}
+            - -v={{ .Values.logLevel }}
+            {{- range .Values.enroller.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.healthPort }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
+          resources:
+            {{- toYaml .Values.enroller.resources | nindent 12 }}
+          env:
+            # The driver's namespace: its RetycIdentity is the cluster-wide one, and every
+            # identity's Secret lives there.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HOME
+              value: /tmp
+            {{- with .Values.enroller.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # The keys of the enrollments under way: memory, never disk.
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.enroller.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        # tmpfs: counts toward the memory of the container writing it.
+        - name: tmp
+          emptyDir:
+            medium: Memory
+        {{- with .Values.enroller.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.enroller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.enroller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.enroller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

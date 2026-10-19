@@ -1,20 +1,26 @@
-# A namespace bringing its own Retyc account. Copy, fill in the Secret, apply: the claim is
-# provisioned in *that* account, and mounted with it, through the retycfs-rwx-tenant class. The
-# Secret's name is fixed by the StorageClass parameters (the chart's storageClasses value).
+# A namespace with its own Retyc machine account. Apply the RetycIdentity, have an administrator of
+# the Retyc organization approve it (Organization > Machines, after comparing the fingerprint):
+#
+#   kubectl -n team-a get retycidentity default -o wide
+#
+# The claim is then provisioned by that machine and mounted with it, through the retycfs-rwx-tenant
+# class. A claim created before the approval stays Pending, with an event giving the fingerprint.
+# The keys land in the Secret retycfs-identity-team-a of the driver's namespace, which the tenant
+# cannot read. The RetycIdentity must be named "default".
 apiVersion: v1
 kind: Namespace
 metadata:
   name: team-a
 ---
-apiVersion: v1
-kind: Secret
+apiVersion: csi.retycfs.com/v1alpha1
+kind: RetycIdentity
 metadata:
-  name: retycfs-credentials
+  name: default
   namespace: team-a
-type: Opaque
-stringData:
-  RETYC_TOKEN: "replace-with-offline-token"          # retyc auth login --offline, on the team's account
-  RETYC_KEY_PASSPHRASE: "replace-with-key-passphrase"
+# Optional with identity.organizationID set on the chart. Immutable: it cannot be added, changed
+# or removed after creation (another organization means another RetycIdentity).
+# spec:
+#   organizationID: REPLACE-WITH-ORGANIZATION-UUID
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -23,6 +29,9 @@ metadata:
   namespace: team-a
   annotations:
     csi.retycfs.com/uid: "1000"   # owner of the files: the UID the pods below run as
+    # People added to the dataroom when it is created, never re-applied (role admin, editor or
+    # viewer, the default). Keep a human admin: see "Dataroom lifecycle" in doc/configuration.md.
+    # csi.retycfs.com/initial-members: "alice@example.com:admin,bob@example.com:editor"
 spec:
   accessModes: [ReadWriteMany]
   storageClassName: retycfs-rwx-tenant

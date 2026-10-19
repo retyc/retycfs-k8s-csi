@@ -1,0 +1,71 @@
+{{- /*
+Guards the identities' Secrets in the driver's namespace: a machine account's keys are written by
+the enroller alone, and the enroller writes nothing else. RBAC cannot say it: a Role grants verbs on
+all Secrets of a namespace, and the node plugin's write its mount pods' (Opaque) Secrets there.
+
+Let through: system:masters (break-glass, the identity of a cluster's admin certificate), and the
+deletions of the namespace controller (a namespace being deleted would otherwise never end). An
+administrator outside system:masters disables admissionPolicy to repair a Secret by hand.
+Always Fail: a policy that cannot be evaluated must not open the keys.
+*/ -}}
+{{- if .Values.admissionPolicy.enabled }}
+{{- $name := printf "%s-identity-secrets" (include "retycfs-csi.fullname" .) }}
+{{- $type := include "retycfs-csi.identitySecretType" . }}
+{{- $secret := include "retycfs-csi.identitySecretName" . }}
+{{- $enroller := printf "system:serviceaccount:%s:%s" .Release.Namespace (include "retycfs-csi.enroller.serviceAccountName" .) }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Release.Namespace }}
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["secrets"]
+  matchConditions:
+    - name: not-break-glass
+      expression: "!('system:masters' in request.userInfo.groups)"
+    - name: not-namespace-deletion
+      expression: >-
+        request.operation != 'DELETE' || !(request.userInfo.username in
+        ['system:serviceaccount:kube-system:namespace-controller', 'system:kube-controller-manager'])
+  variables:
+    # A DELETE has no object: the Secret is the one being deleted.
+    - name: secret
+      expression: "request.operation == 'DELETE' ? oldObject : object"
+    - name: identity
+      expression: "has(variables.secret.type) && variables.secret.type == '{{ $type }}'"
+    - name: enroller
+      expression: "request.userInfo.username == '{{ $enroller }}'"
+  validations:
+    - expression: "variables.enroller || !variables.identity"
+      messageExpression: >-
+        'Secret ' + variables.secret.metadata.name + ' holds a Retyc machine identity (type {{ $type }}):
+        only the enroller ({{ $enroller }}) creates, updates or deletes it. Delete or recreate the
+        RetycIdentity instead'
+      message: "only the enroller writes the Secrets of type {{ $type }}"
+      reason: Forbidden
+    - expression: >-
+        !variables.enroller || (variables.identity && (variables.secret.metadata.name == '{{ $secret }}'
+        || variables.secret.metadata.name.startsWith('{{ $secret }}-')))
+      message: "the enroller only writes the Secrets {{ $secret }} and {{ $secret }}-<namespace> of type {{ $type }}"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions: [Deny]
+{{- end }}

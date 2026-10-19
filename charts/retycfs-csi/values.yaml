@@ -14,49 +14,51 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
-# Cluster-wide Retyc identity, optional. Without one (`token` empty and no `existingSecret`), the
-# StorageClasses without a `tenantSecretName` are not rendered at all and only per-namespace
-# identities are served (NOTES says so); nothing fails.
-credentials:
-  # -- Create the Secret holding the cluster-wide Retyc identity from `token` and `keyPassphrase`
-  # (only when `token` is set).
-  create: true
-  # -- Name of an existing Secret with keys RETYC_TOKEN and RETYC_KEY_PASSPHRASE. Takes precedence over `create`.
-  existingSecret: ""
-  # -- Offline token, minted with `retyc auth login --offline`.
-  token: ""
-  # -- Passphrase of the account's AGE key.
-  keyPassphrase: ""
+# Retyc identities: machine accounts the enroller requests from Retyc, each approved by an
+# organization administrator (Organization > Machines) after comparing its fingerprint. Their keys
+# stay in Secrets of the release namespace, which only the enroller writes.
+identity:
+  # -- UUID of the Retyc organization of the cluster-wide identity. Set, the enroller creates the
+  # RetycIdentity `default` of the release namespace (Secret `retycfs-identity`), the StorageClasses
+  # without `tenant` are rendered; their claims wait until the machine is approved (the pods do not).
+  # Also the organization of the tenants' RetycIdentities without `spec.organizationID`. Empty:
+  # tenant identities only. Changing it later does not move an existing identity (organizationID is
+  # immutable): delete the RetycIdentity `default` of the release namespace to enroll in the new one.
+  organizationID: ""
+  # -- Prefix of the machines' default display name in Retyc, `<clusterName>/<namespace>`.
+  clusterName: kubernetes
 
 storageClasses:
   # Each entry becomes a StorageClass provisioned by this driver, with allowVolumeExpansion.
-  # `tenantSecretName` switches the class to per-namespace identities: the provisioner, the resizer
-  # and kubelet resolve a Secret of that name in the claim's namespace instead of using the
-  # driver's own credentials. A class without it is only rendered when a cluster-wide identity
-  # exists (see `credentials`).
+  # `tenant: true` switches the class to per-namespace identities: the provisioner, the resizer and
+  # kubelet use the Secret `retycfs-identity-<claim namespace>` of the release namespace, the
+  # enrolled identity of a RetycIdentity in the claim's namespace, instead of the cluster-wide one.
+  # A class without it is only rendered with a cluster-wide identity (`identity.organizationID`).
   - name: retycfs-rwx
     reclaimPolicy: Delete
     volumeBindingMode: Immediate
     isDefault: false
     annotations: {}
-    tenantSecretName: ""
+    tenant: false
   - name: retycfs-rwx-retain
     reclaimPolicy: Retain
     volumeBindingMode: Immediate
     isDefault: false
     annotations: {}
-    tenantSecretName: ""
+    tenant: false
   - name: retycfs-rwx-tenant
-    # Retain on purpose: a tenant deleting its Secret before its claims would otherwise leave PVs
-    # stuck on a DeleteVolume that can no longer authenticate.
+    # Retain on purpose: a tenant deleting its RetycIdentity before its claims would otherwise
+    # leave PVs stuck on a DeleteVolume that can no longer authenticate.
     reclaimPolicy: Retain
     volumeBindingMode: Immediate
     isDefault: false
     annotations: {}
-    tenantSecretName: retycfs-credentials
+    tenant: true
 
 rbac:
-  # -- Create the ClusterRoles/ClusterRoleBindings for the provisioner and the resizer.
+  # -- Create the RBAC of the controller, the node plugin and the enroller, and the aggregated
+  # ClusterRoles on RetycIdentities (`<fullname>-identity-edit` to the edit and admin roles,
+  # `<fullname>-identity-view` to view).
   create: true
 
 serviceAccount:
@@ -68,6 +70,12 @@ serviceAccount:
   node:
     create: true
     # -- Defaults to `<fullname>-node`.
+    name: ""
+    annotations: {}
+  enroller:
+    create: true
+    # -- Defaults to `<fullname>-enroller`. The machine identity admission policy only lets this
+    # service account write the identities' Secrets.
     name: ""
     annotations: {}
 
@@ -156,8 +164,8 @@ logLevel: 2
 probes:
   # Liveness only checks that the driver still serves HTTP. Restarting the node plugin cuts no
   # mount (the mount pods hold them), but stages, publishes and the repair of dead mount pods wait
-  # for it on that node, so it stays lenient. Readiness carries the real diagnosis and only flips
-  # the pod to NotReady.
+  # for it on that node, so it stays lenient. Readiness: the driver serves (the identities show on
+  # their RetycIdentity, so that `helm install --wait` does not wait for an approval).
   liveness:
     initialDelaySeconds: 10
     periodSeconds: 30
@@ -300,13 +308,39 @@ node:
       limits:
         memory: 64Mi
 
+# Enroller: requests the machine accounts of the RetycIdentities (`retyc machine enroll`), keeps
+# their keys in Secrets of the release namespace and checks the approved ones. One replica, same
+# image as the controller, non-root; the keys only touch its in-memory /tmp.
+enroller:
+  # -- Extra /etc/hosts entries of the enroller pod.
+  hostAliases: []
+  # -- Extra arguments for the enroller container.
+  extraArgs: []
+  # -- Extra environment variables for the enroller container, e.g. an egress proxy.
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  # Each enrollment runs one retyc process that waits for the approval (15 minutes at most).
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 256Mi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+
 # Mount pods: one per volume and node, in the release namespace, running `retyc fs mount`. Their
 # settings apply to the pods created from now on: a running pod keeps its own until its volume is
 # remounted on its node.
 mount:
   image:
     repository: ghcr.io/retyc/retyc-cli
-    tag: v1.5.0
+    tag: v1.6.0-beta1
     pullPolicy: IfNotPresent
   # -- Pull secrets of the retyc-cli image, in the release namespace.
   imagePullSecrets: []
@@ -317,14 +351,15 @@ mount:
   # -- Share the host PID namespace (not needed so far, kept for diagnosis).
   hostPID: false
   # -- Default resources of a mount pod, overridden per claim by the csi.retycfs.com/mount-cpu-request,
-  # -cpu-limit, -memory-request and -memory-limit annotations. Unlocking the AGE key (scrypt) takes
-  # about 256 MiB at start.
+  # -cpu-limit, -memory-request and -memory-limit annotations. The limit leaves room for the FUSE
+  # buffers, the in-memory listing cache and the files in transit; raise it per claim for large
+  # trees with `cache.store: memory`.
   resources:
     requests:
       cpu: 50m
-      memory: 256Mi
+      memory: 96Mi
     limits:
-      memory: 512Mi
+      memory: 384Mi
   # -- How long a stopping mount pod may take to send its pending writes (`--drain-timeout`).
   drainTimeout: 5m
   # -- Priority class of the mount pods; empty means system-node-critical.
@@ -378,15 +413,20 @@ cache:
 # known: a claim that gets one of them later as the cluster default (retroactive default class
 # assignment, on a claim created without storageClassName) and a static PV's claim on another
 # class are not checked; the driver still refuses them at CreateVolume or at stage.
+#
+# A second policy guards the identities' Secrets (type csi.retycfs.com/machine-identity) in the
+# release namespace: only the enroller's service account creates, updates or deletes them, and it
+# writes no other Secret than `retycfs-identity` and `retycfs-identity-*` of that type. Members of
+# system:masters are let through (break-glass).
 admissionPolicy:
-  # -- Create the policy and its binding.
+  # -- Create the policies and their bindings.
   enabled: true
   # -- `Fail` or `Ignore`: what the API server does with a request when the policy cannot be
   # evaluated (a CEL error, a missing parameter). The reach is small either way: only the CREATE and
   # UPDATE of the claims of this release's StorageClasses are matched, never other storage. But
   # with `Fail`, a broken policy blocks every CREATE and UPDATE of those claims (a StatefulSet's
   # new claims included); `Ignore` lets them through unchecked, and the driver refuses an invalid
-  # claim later (CreateVolume, stage).
+  # claim later (CreateVolume, stage). The Secrets policy always fails closed.
   failurePolicy: Fail
 
 # Values of the Redis subchart (https://github.com/CloudPirates-io/helm-charts/tree/main/charts/redis),

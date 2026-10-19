@@ -8,6 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/retyc/retycfs-k8s-csi/internal/identity"
 )
 
 // Real stderr captured from `retyc --json dataroom rm retyc://0000... -y` on 2026-09-03: the
@@ -126,7 +129,7 @@ func TestKinds(t *testing.T) {
 	check := func(err error) preds {
 		return preds{
 			IsNotFound(err), IsStorageExhausted(err), IsCapacityRefused(err), IsNotEnlarged(err), IsValidation(err),
-			IsUnauthenticated(err), IsConfig(err), IsRateLimited(err), IsCLITooOld(err), IsForbidden(err),
+			IsMachineRefused(err), IsConfig(err), IsRateLimited(err), IsCLITooOld(err), IsForbidden(err),
 		}
 	}
 	for _, tc := range []struct {
@@ -141,7 +144,11 @@ func TestKinds(t *testing.T) {
 		{kinded(KindInvalid, "API error 422: x"), preds{validation: true}},
 		{kinded(KindAuthRequired, "not logged in"), preds{auth: true}},
 		{kinded(KindUnauthenticated, "API error 401: x"), preds{auth: true}},
-		{kinded(KindConfig, "key passphrase"), preds{config: true}},
+		{kinded(KindConfig, "machine account configuration"), preds{config: true}},
+		// Without a kind, the exit code; a denied enrollment exits 78 but is no configuration error.
+		{&Error{ExitCode: ExitMachineRefused}, preds{auth: true}},
+		{&Error{ExitCode: ExitConfig}, preds{config: true}},
+		{&Error{ExitCode: ExitConfig, Kind: KindEnrollmentDenied}, preds{}},
 		{kinded(KindRateLimited, "API error 429: x"), preds{rate: true}},
 		{kinded(KindCLITooOld, "API error 426: x"), preds{old: true}},
 		{kinded(KindForbidden, "API error 403: x"), preds{forbidden: true}},
@@ -178,7 +185,9 @@ case "$2 $3" in
   "dataroom create") printf '{"id":"dr-1","title":"%s"}\n' "$5" ;;
   "dataroom ls")     printf '{"items":[{"id":"dr-1","title":"a"}],"total":30,"page":1,"pages":2}\n' ;;
   "auth status")
-    if [ "$RETYC_TOKEN" = "good" ]; then printf '{"authenticated":true,"offline":true}\n'
+    if [ -n "$RETYC_TOKEN" ]; then echo '{"error":"mixed","kind":"config"}' >&2; exit 78; fi
+    if [ "$(cat "$RETYC_MACHINE_DIR/client.key" 2>/dev/null)" = "good" ]; then printf '{"authenticated":true}\n'
+    elif [ -n "$RETYC_MACHINE_DIR" ]; then printf '{"authenticated":false,"reason":"machine_revoked"}\n'
     else printf '{"authenticated":false,"reason":"no_token"}\n'; fi ;;
   "dataroom rm")
     printf '\r\033[K{"error":"deleting dataroom: API error 404: {\\"detail\\":\\"Dataroom not found\\"}"}\n' >&2
@@ -206,19 +215,26 @@ esac
 		t.Fatalf("ListDatarooms: %+v, %v", list, err)
 	}
 
-	if err := New(fake, []string{"RETYC_TOKEN=good"}).AuthStatusCheck(ctx); err != nil {
+	machine := func(key string) *identity.Credentials {
+		return &identity.Credentials{Files: map[string][]byte{
+			identity.ClientKeyFile: []byte(key), identity.AgeKeyFile: []byte("age"), identity.MachineFile: []byte("{}"),
+		}}
+	}
+	// A token inherited from the driver's environment is never passed along with the machine account.
+	inherited := New(fake, []string{"RETYC_TOKEN=stale", "PATH=" + os.Getenv("PATH")})
+	inherited.TempDir = t.TempDir()
+	if err := inherited.WithIdentity(machine("good")).AuthStatusCheck(ctx); err != nil {
 		t.Fatalf("AuthStatusCheck authenticated: %v", err)
 	}
-	err = New(fake, []string{"RETYC_TOKEN=bad"}).AuthStatusCheck(ctx)
-	if err == nil || !strings.Contains(err.Error(), "no_token") {
-		t.Fatalf("AuthStatusCheck unauthenticated must fail with the reason, got %v", err)
+	err = inherited.WithIdentity(machine("disabled")).AuthStatusCheck(ctx)
+	if !IsMachineRefused(err) {
+		t.Fatalf("AuthStatusCheck of a refused machine must be ErrMachineRefused, got %v", err)
 	}
-	bad := New(fake, []string{"RETYC_TOKEN=bad"})
-	if err := bad.WithEnv(map[string]string{"RETYC_TOKEN": "good"}).AuthStatusCheck(ctx); err != nil {
-		t.Fatalf("WithEnv must override the inherited token: %v", err)
+	if err := inherited.AuthStatusCheck(ctx); err == nil || !strings.Contains(err.Error(), "no_token") {
+		t.Fatalf("WithIdentity must not modify the original client: %v", err)
 	}
-	if err := bad.AuthStatusCheck(ctx); err == nil {
-		t.Fatal("WithEnv must not modify the original client")
+	if left, _ := os.ReadDir(inherited.TempDir); len(left) != 0 {
+		t.Fatalf("the identity directories must be removed, found %v", left)
 	}
 
 	_, err = c.DeleteDataroom(ctx, "dr-404")
@@ -348,5 +364,142 @@ func TestParseStderrErrorLastLine(t *testing.T) {
 		`{"error":"not authenticated","kind":"auth_required"}` + "\n"
 	if got := parseStderrError([]byte(stderr)); got.Kind != KindAuthRequired {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+// The exit code is kept on the error: 77 is a refused machine, 78 a configuration error.
+func TestExitCodes(t *testing.T) {
+	for _, tc := range []struct {
+		code            int
+		stderr          string
+		refused, config bool
+	}{
+		{77, `{"error":"machine token request: refused","kind":"auth_required"}`, true, false},
+		{78, `{"error":"client.key has mode 0644","kind":"config"}`, false, true},
+		{78, "not even JSON", false, true},
+		{1, `{"error":"dial tcp: refused","kind":"error"}`, false, false},
+	} {
+		c, _ := argsRecorder(t, tc.stderr, tc.code)
+		versioning := true
+		err := c.UpdateDataroom(context.Background(), "dr-1", nil, &versioning)
+		var cliErr *Error
+		if !errors.As(err, &cliErr) || cliErr.ExitCode != tc.code || IsMachineRefused(err) != tc.refused ||
+			IsConfig(err) != tc.config {
+			t.Errorf("exit %d: %#v, refused = %v, config = %v", tc.code, err, IsMachineRefused(err), IsConfig(err))
+		}
+	}
+}
+
+func TestEnviron(t *testing.T) {
+	c := New("retyc", []string{
+		"PATH=/bin", "RETYC_TOKEN=t", "RETYC_KEY_PASSPHRASE=p", "RETYC_MACHINE_DIR=/elsewhere",
+		"RETYC_CLIENT_KEY_FILE=/k", "RETYC_ENV_FILE=/env", "RETYC_API_BASE_URL=https://api.example",
+	})
+	c.TempDir = t.TempDir()
+	env, cleanup, err := c.environ()
+	cleanup()
+	if err != nil || strings.Join(env, " ") != "PATH=/bin RETYC_API_BASE_URL=https://api.example" {
+		t.Fatalf("without identity: %v, %v", env, err)
+	}
+	c = c.WithIdentity(&identity.Credentials{Files: map[string][]byte{
+		identity.ClientKeyFile: []byte("k"), identity.AgeKeyFile: []byte("a"), identity.MachineFile: []byte("{}"),
+	}})
+	env, cleanup, err = c.environ()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := strings.TrimPrefix(env[len(env)-1], identity.MachineDirKey+"=")
+	if len(env) != 3 || dir == env[len(env)-1] {
+		t.Fatalf("with identity: %v", env)
+	}
+	if st, err := os.Stat(dir); err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("identity directory: %v, %v", st, err)
+	}
+	if data, err := os.ReadFile(dir + "/client.key"); err != nil || string(data) != "k" { //nolint:gosec // G304: test
+		t.Fatalf("client.key: %q, %v", data, err)
+	}
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("the identity directory must be removed: %v", err)
+	}
+}
+
+func TestAddMember(t *testing.T) {
+	c, calls := argsRecorder(t, `{"dataroom_id":"dr-1","email":"a@b.fr","role":"admin"}`, 0)
+	if err := c.AddMember(context.Background(), "dr-1", "a@b.fr", RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if got := calls(); len(got) != 1 || got[0] != "--json dataroom user add --role admin -- dr-1 a@b.fr" {
+		t.Fatalf("calls = %q", got)
+	}
+}
+
+func TestParseEnrollEvent(t *testing.T) {
+	ev, err := ParseEnrollEvent([]byte(`{"event":"pending","enrollment_id":"e-1","fingerprint":"K7QF-2MXA-PD9R-H3TB",` +
+		`"approval_uri":"https://app/x","expires_at":"2026-10-17T18:30:00Z"}` + "\n"))
+	want := EnrollEvent{Event: EnrollPending, EnrollmentID: "e-1", Fingerprint: "K7QF-2MXA-PD9R-H3TB",
+		ApprovalURI: "https://app/x", ExpiresAt: time.Date(2026, 10, 17, 18, 30, 0, 0, time.UTC)}
+	if err != nil || ev != want {
+		t.Fatalf("pending: %+v, %v", ev, err)
+	}
+	ev, err = ParseEnrollEvent([]byte(`{"event":"approved","machine_id":"m","organization_id":"o","client_id":"c"}`))
+	if err != nil || ev != (EnrollEvent{Event: EnrollApproved, MachineID: "m", OrganizationID: "o", ClientID: "c"}) {
+		t.Fatalf("approved: %+v, %v", ev, err)
+	}
+	// A resumed request has no approval URI nor, possibly, expiry.
+	if ev, err := ParseEnrollEvent([]byte(`{"event":"pending","enrollment_id":"e-1"}`)); err != nil ||
+		!ev.ExpiresAt.IsZero() {
+		t.Fatalf("resumed: %+v, %v", ev, err)
+	}
+	for _, line := range []string{``, `{}`, `not json`, `{"event":"pending","expires_at":"tomorrow"}`} {
+		if _, err := ParseEnrollEvent([]byte(line)); err == nil {
+			t.Errorf("%q must be refused", line)
+		}
+	}
+}
+
+func TestEnroll(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	dir := t.TempDir()
+	script := `#!/bin/sh
+echo "$*" > ` + dir + `/args
+echo '{"event":"pending","enrollment_id":"e-1","fingerprint":"FP"}'
+echo 'noise'
+case "$ENROLL_OUTCOME" in
+  approved) echo '{"event":"approved","machine_id":"m-1","organization_id":"o","client_id":"c"}' ;;
+  expired) echo '{"event":"expired","enrollment_id":"e-1"}'
+    echo '{"error":"expired","kind":"enrollment_expired"}' >&2; exit 1 ;;
+  denied) echo '{"event":"denied","enrollment_id":"e-1"}'
+    echo '{"error":"denied","kind":"enrollment_denied"}' >&2; exit 78 ;;
+esac
+`
+	//nolint:gosec // G306: the fixture is a script and must be executable
+	if err := os.WriteFile(dir+"/retyc", []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := EnrollParams{OrganizationID: "org-1", Dir: "/id", Name: "cluster-a", ClusterUID: "uid-1"}
+	for outcome, want := range map[string]error{
+		"approved": nil, "expired": ErrEnrollmentExpired, "denied": ErrEnrollmentDenied,
+	} {
+		c := New(dir+"/retyc", []string{"ENROLL_OUTCOME=" + outcome, "RETYC_TOKEN=never"})
+		c.Timeout = time.Nanosecond // not applied to Enroll
+		var events []string
+		err := c.Enroll(context.Background(), p, func(ev EnrollEvent) { events = append(events, ev.Event) })
+		if want == nil && err != nil || want != nil && !errors.Is(err, want) {
+			t.Errorf("%s: err = %v, want %v", outcome, err, want)
+		}
+		if outcome == "denied" && IsConfig(err) {
+			t.Errorf("a denied enrollment is not a configuration error")
+		}
+		if strings.Join(events, ",") != "pending,"+outcome {
+			t.Errorf("%s: events = %v", outcome, events)
+		}
+	}
+	args, err := os.ReadFile(dir + "/args") //nolint:gosec // G304: test fixture path
+	if err != nil || strings.TrimSpace(string(args)) !=
+		"--json machine enroll --org org-1 --output-dir /id --name cluster-a --cluster-uid uid-1" {
+		t.Fatalf("args = %q, %v", args, err)
 	}
 }

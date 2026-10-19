@@ -24,7 +24,6 @@ import (
 	"k8s.io/klog/v2"
 	mountutils "k8s.io/mount-utils"
 
-	"github.com/retyc/retycfs-k8s-csi/internal/identity"
 	"github.com/retyc/retycfs-k8s-csi/internal/mountpod"
 )
 
@@ -63,8 +62,9 @@ type NodeServer struct {
 	Kube kubernetes.Interface
 	// Events records on the claims what the volume's users must know; nil records nothing.
 	Events record.EventRecorder
-	// DefaultCredentials is the driver's own identity, used without node-stage secrets; nil if none.
-	DefaultCredentials *identity.Credentials
+	// IdentityDir holds the driver's own identity (its Secret, mounted), read at each stage without
+	// node-stage secrets.
+	IdentityDir string
 	// Cache is the listing cache of every mount pod (node-wide).
 	Cache mountpod.Cache
 	// MountInfo reads the mount table; nil reads /proc/self/mountinfo.
@@ -182,7 +182,8 @@ func (s *NodeServer) NodeStageVolume(
 // stageSpec builds the mount pod spec of a stage request: settings from the claim's annotations
 // over the volume context (a static PV's volumeAttributes), credentials from the node-stage
 // secrets (a tenant's) or the driver's default identity, never for a volume of a tenant class (see
-// checkDefaultIdentity).
+// checkDefaultIdentity), and a tenant identity only in the namespace it was enrolled for (see
+// checkIdentityNamespace).
 func (s *NodeServer) stageSpec(
 	ctx context.Context, req *csi.NodeStageVolumeRequest,
 ) (*mountpod.Spec, *corev1.PersistentVolumeClaim, error) {
@@ -214,19 +215,19 @@ func (s *NodeServer) stageSpec(
 		return nil, nil, status.Errorf(codes.InvalidArgument, "volume %s (claim %s/%s): %v", req.GetVolumeId(),
 			namespace, name, err)
 	}
-	creds, err := identity.FromSecrets(req.GetSecrets())
+	creds, err := resolveIdentity(req.GetSecrets(), s.IdentityDir, func() error {
+		return s.checkDefaultIdentity(ctx, req.GetVolumeId(), claim)
+	})
 	if err != nil {
-		return nil, nil, status.Errorf(codes.InvalidArgument, "node-stage secret: %v", err)
+		return nil, nil, err
 	}
-	if creds == nil {
-		if err := s.checkDefaultIdentity(ctx, req.GetVolumeId(), claim); err != nil {
-			return nil, nil, err
-		}
-		creds = s.DefaultCredentials
+	// A tenant identity is checked against the claim's namespace, and refused without a claim.
+	claimNS := ""
+	if claim != nil {
+		claimNS = claim.Namespace
 	}
-	if creds == nil || creds.Token == "" || creds.Passphrase == "" {
-		return nil, nil, status.Error(codes.FailedPrecondition,
-			"no credentials: the StorageClass has no node-stage secret and the driver no complete default identity")
+	if err := checkIdentityNamespace(ctx, s.Kube, creds, claimNS); err != nil {
+		return nil, nil, err
 	}
 
 	return &mountpod.Spec{
@@ -237,8 +238,8 @@ func (s *NodeServer) stageSpec(
 }
 
 // ensureMounted makes sure the volume's mount pod runs spec and has mounted it on spec's staging
-// path, and returns Aborted until then: kubelet retries, and a first mount (image pull, login,
-// scrypt) can outlast one call. A pod running another config is recreated if the volume is not
+// path, and returns Aborted until then: kubelet retries, and a first mount (image pull, login)
+// can outlast one call. A pod running another config is recreated if the volume is not
 // published on the node, kept otherwise. A pod mounted on another staging path is recreated, unless
 // that path is still mounted (FailedPrecondition). The caller holds the volume's lock.
 //
@@ -253,9 +254,11 @@ func (s *NodeServer) stageSpec(
 // backoff (up to about 2 minutes) for as long as the pod waits for the volume. The exited pod is
 // released at the next sweep (see deleteOrphan), its finalizer and Secret with it, but the Manager
 // keeps the give-up, so each retry fails at once, without a new pod nor a new login, and reports
-// MountGaveUp only once, until the credentials change (another config hash), the exited pod is
-// deleted by hand before the sweep (`kubectl delete pod`, see mountpod's startOver), no stage found
-// it given up for orphanGrace (see pruneBackoffs) or the node plugin restarts.
+// MountGaveUp only once, until the credentials change (another config hash), a give-up on a 77
+// expires (mountpod.GiveUpRetryAfter, not extended by the retries: one new try, the machine may
+// have been enabled again), the exited pod is deleted by hand before the sweep (`kubectl delete
+// pod`, see mountpod's startOver), no stage found it given up for orphanGrace (see pruneBackoffs) or the
+// node plugin restarts.
 func (s *NodeServer) ensureMounted(
 	ctx context.Context, spec *mountpod.Spec, claim *corev1.PersistentVolumeClaim,
 ) (mountpod.State, error) {

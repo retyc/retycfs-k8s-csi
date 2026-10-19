@@ -1,7 +1,7 @@
-# The published chart in the test VMs (CLUSTER_CHART=prod, the default of .env): released images,
-# the production API, and the Secret created by `make vm-secret`.
-credentials:
-  existingSecret: 'retycfs-csi-credentials'
+# The published chart in the test VMs (CLUSTER_CHART=prod, the default of .env): released images and the
+# production API. `make vm-helm` adds identity.organizationID from RETYC_ORGANIZATION_ID; the
+# cluster-wide machine account then waits for an approval in Retyc (doc/testing.md). Needs a published
+# chart with machine accounts: until then, CLUSTER_CHART=dev.
 
 # The retyc CLI exports its traces over OTLP as soon as an endpoint is set: to the Jaeger the
 # Vagrantfile provisions (UI on http://localhost:18081).

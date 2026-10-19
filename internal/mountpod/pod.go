@@ -60,13 +60,25 @@ const (
 	podStagingDir = "/staging"
 	podSpoolDir   = "/spool"
 	podConfigDir  = "/config"
+	// podMachineDir is where the pod's Secret projects the machine account files (RETYC_MACHINE_DIR).
+	podMachineDir = "/machine"
 	devFuse       = "/dev/fuse"
 )
 
-// Keys of the mount pod's Secret, read by the CLI from its environment.
+// Keys of the mount pod's Secret besides the identity files (identity.FileNames), read by the CLI
+// from its environment.
 const (
 	secretRedisURL = "RETYC_CACHE_REDIS_URL" //nolint:gosec // G101: a variable name, not a credential
 )
+
+// envConfigDir overrides the CLI's config directory (config.yaml and its state); it wins over
+// XDG_CONFIG_HOME.
+const envConfigDir = "RETYC_CONFIG_DIR"
+
+// machineFileMode is the mode of the projected identity files. The mount container runs as root,
+// which reads them whatever their mode; the CLI refuses a file that "other" can read, and nothing
+// else in the pod needs them, so owner read only.
+const machineFileMode int32 = 0o400
 
 // Spec is what one volume's mount pod needs on one node. Everything but the PVC fields goes into
 // the config hash.
@@ -81,8 +93,8 @@ type Spec struct {
 	// the paths accepted). Recorded on the pod (AnnotationStagingPath) for the recovery.
 	StagingPath string
 
-	// Credentials are the identity the volume is mounted with: the driver's default one, or a copy
-	// of the tenant's secret received at stage.
+	// Credentials are the machine account the volume is mounted with: the driver's default one, or
+	// a copy of the tenant's secret received at stage.
 	Credentials identity.Credentials
 	Cache       Cache
 	// UID and GID own every file of the mount (`--uid`, `--gid`).
@@ -115,8 +127,9 @@ func (s *Spec) validate() error {
 		return fmt.Errorf("%w: node name is empty", ErrInvalidSpec)
 	case s.VolumeID == "" || s.VolumeID == "." || s.VolumeID == ".." || strings.ContainsAny(s.VolumeID, "/\x00"):
 		return fmt.Errorf("%w: volume ID %q is not a path component", ErrInvalidSpec, s.VolumeID)
-	case s.Credentials.Token == "" || s.Credentials.Passphrase == "":
-		return fmt.Errorf("%w for volume %s: credentials are incomplete", ErrInvalidSpec, s.VolumeID)
+	}
+	if err := s.Credentials.Complete(); err != nil {
+		return fmt.Errorf("%w for volume %s: %w", ErrInvalidSpec, s.VolumeID, err)
 	}
 
 	return nil
@@ -154,19 +167,18 @@ func isLabelChar(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.'
 }
 
-// configHash covers what a pod cannot change once started. Tokens are high-entropy, so a SHA-256
-// of the credentials in an annotation reveals nothing usable.
+// configHash covers what a pod cannot change once started. The identity enters through its Key,
+// a hash of its keys and machine.json: nothing usable is revealed by the annotation.
 func configHash(spec *Spec, resources corev1.ResourceRequirements, image string) string {
 	data, _ := json.Marshal(struct {
-		Token, Passphrase string
-		Cache             Cache
-		UID, GID          uint32
-		Options           Options
-		Resources         corev1.ResourceRequirements
-		Image             string
+		Identity  string
+		Cache     Cache
+		UID, GID  uint32
+		Options   Options
+		Resources corev1.ResourceRequirements
+		Image     string
 	}{
-		spec.Credentials.Token, spec.Credentials.Passphrase, spec.Cache, spec.UID, spec.GID, spec.Options,
-		resources, image,
+		spec.Credentials.Key(), spec.Cache, spec.UID, spec.GID, spec.Options, resources, image,
 	})
 	sum := sha256.Sum256(data)
 
@@ -278,12 +290,10 @@ func specAnnotation(spec *Spec) string {
 }
 
 // buildSecret returns a new Secret for a pod of spec: each pod gets its own, so that a former pod
-// never takes the Secret of its successor away when the garbage collector deletes it.
+// never takes the Secret of its successor away when the garbage collector deletes it. It holds the
+// files the CLI reads (client.key, age.key, machine.json) under their names, which SpecOf reads back.
 func (m *Manager) buildSecret(spec *Spec, hash string) *corev1.Secret {
-	data := map[string][]byte{
-		identity.TokenKey:      []byte(spec.Credentials.Token),
-		identity.PassphraseKey: []byte(spec.Credentials.Passphrase),
-	}
+	data := spec.Credentials.MachineFiles()
 	if spec.Cache.RedisURL != "" {
 		data[secretRedisURL] = []byte(spec.Cache.RedisURL)
 	}
@@ -317,13 +327,11 @@ func (m *Manager) buildPod(spec *Spec, hash, secretName string) *corev1.Pod {
 			LocalObjectReference: corev1.LocalObjectReference{Name: secretName}, Key: key,
 		}}}
 	}
-	// The CLI's key cache is off: every mount pod runs as root, and the user keyring of root is
-	// shared by all of them whatever identity they mount with.
+	// The machine account is the Secret's files, projected in podMachineDir. The config directory
+	// is the pod's own, empty: neither the image's nor the host's settings apply.
 	env := []corev1.EnvVar{
-		secretEnv(identity.TokenKey),
-		secretEnv(identity.PassphraseKey),
-		{Name: identity.ConfigDirKey, Value: podConfigDir},
-		{Name: identity.KeyringEnabledKey, Value: "false"},
+		{Name: identity.MachineDirKey, Value: podMachineDir},
+		{Name: envConfigDir, Value: podConfigDir},
 	}
 	if spec.Cache.RedisURL != "" {
 		env = append(env, secretEnv(secretRedisURL))
@@ -338,6 +346,13 @@ func (m *Manager) buildPod(spec *Spec, hash, secretName string) *corev1.Pod {
 	bidirectional := corev1.MountPropagationBidirectional
 	grace := int64((m.cfg.DrainTimeout + terminationMargin) / time.Second)
 	privileged, root, noToken, noLinks := true, int64(0), false, false
+	machineFiles := make([]corev1.KeyToPath, 0, len(identity.FileNames))
+	for _, name := range identity.FileNames {
+		if _, ok := spec.Credentials.MachineFiles()[name]; ok {
+			machineFiles = append(machineFiles, corev1.KeyToPath{Key: name, Path: name})
+		}
+	}
+	fileMode := machineFileMode
 
 	return &corev1.Pod{
 		ObjectMeta: meta,
@@ -380,6 +395,7 @@ func (m *Manager) buildPod(spec *Spec, hash, secretName string) *corev1.Pod {
 					{Name: "staging", MountPath: podStagingDir, MountPropagation: &bidirectional},
 					{Name: "spool", MountPath: podSpoolDir},
 					{Name: "config", MountPath: podConfigDir},
+					{Name: "machine", MountPath: podMachineDir, ReadOnly: true},
 					{Name: "fuse", MountPath: devFuse},
 				},
 			}},
@@ -391,6 +407,10 @@ func (m *Manager) buildPod(spec *Spec, hash, secretName string) *corev1.Pod {
 				// Created 0700 by the Prepare hook: kubelet would create a missing one 0755.
 				hostPath("spool", m.SpoolHostPath(spec.VolumeID), corev1.HostPathDirectory),
 				{Name: "config", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				// The identity files only (Items): not the Redis URL of the same Secret.
+				{Name: "machine", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+					SecretName: secretName, Items: machineFiles, DefaultMode: &fileMode,
+				}}},
 				hostPath("fuse", devFuse, corev1.HostPathCharDev),
 			},
 		},

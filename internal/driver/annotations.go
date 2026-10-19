@@ -2,6 +2,7 @@ package driver
 
 import (
 	"fmt"
+	"net/mail"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,7 +36,69 @@ const (
 	AnnotationMountCPULimit      = "csi.retycfs.com/mount-cpu-limit"
 	AnnotationMountMemoryRequest = "csi.retycfs.com/mount-memory-request"
 	AnnotationMountMemoryLimit   = "csi.retycfs.com/mount-memory-limit"
+
+	// AnnotationInitialMembers lists the people CreateVolume adds to the dataroom it creates:
+	// "alice@acme.fr:admin,bob@acme.fr:editor,carol@acme.fr", role admin, editor or viewer (the
+	// default). Read at creation only: changing it later changes nothing.
+	AnnotationInitialMembers = "csi.retycfs.com/initial-members"
 )
+
+// Roles of an initial member, as `retyc dataroom user add --role` takes them.
+const (
+	roleAdmin  = "admin"
+	roleEditor = "editor"
+	roleViewer = "viewer"
+)
+
+// member is one entry of AnnotationInitialMembers.
+type member struct {
+	Email, Role string
+}
+
+// parseInitialMembers reads AnnotationInitialMembers, strictly: comma-separated entries, each a
+// bare e-mail address, optionally followed by ":" and a role; no empty entry, no address twice.
+// Spaces around an entry are ignored. A claim without the annotation has no initial member.
+func parseInitialMembers(annotations map[string]string) ([]member, error) {
+	raw, ok := annotations[AnnotationInitialMembers]
+	if !ok {
+		return nil, nil
+	}
+	fail := func(format string, args ...any) error {
+		return fmt.Errorf("annotation %s = %q: %s", AnnotationInitialMembers, raw, fmt.Sprintf(format, args...))
+	}
+	var members []member
+	seen := map[string]bool{}
+	for entry := range strings.SplitSeq(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			return nil, fail("empty entry: want email[:role] separated by commas")
+		}
+		email, role, hasRole := strings.Cut(entry, ":")
+		if !hasRole {
+			role = roleViewer
+		}
+		switch role {
+		case roleAdmin, roleEditor, roleViewer:
+		default:
+			return nil, fail("entry %q: role %q, want %s, %s or %s", entry, role, roleAdmin, roleEditor, roleViewer)
+		}
+		// A bare address only: no display name, no angle brackets, and nothing a CLI could take for a flag.
+		if strings.HasPrefix(email, "-") {
+			return nil, fail("entry %q: %q is not an e-mail address (it must not start with \"-\")", entry, email)
+		}
+		if addr, err := mail.ParseAddress(email); err != nil || addr.Address != email || addr.Name != "" {
+			return nil, fail("entry %q: %q is not an e-mail address", entry, email)
+		}
+		key := strings.ToLower(email)
+		if seen[key] {
+			return nil, fail("%s is listed twice", email)
+		}
+		seen[key] = true
+		members = append(members, member{Email: email, Role: role})
+	}
+
+	return members, nil
+}
 
 // mountSettings are the per-volume settings of a mount pod, read from the claim's annotations.
 type mountSettings struct {

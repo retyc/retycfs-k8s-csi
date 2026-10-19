@@ -23,9 +23,11 @@ can be expanded, and their versioning switched through a VolumeAttributesClass.
 - Kubernetes **1.34** or later;
 - nodes that can run RetycFS (see the [mount pods](doc/architecture.md#mount-pods)) and reach `api.retyc.com` and
   `auth.retyc.com`;
-- a namespace for the driver that allows privileged pods (Pod Security `privileged`; `kube-system` usually does);
-- a Retyc account and two credentials: a token, printed once by `retyc auth login --offline`, and the passphrase of
-  your Retyc key, the one the CLI asks you for.
+- a namespace for the driver that allows privileged pods (Pod Security `privileged`): `retycfs-system`, created below;
+- a Retyc organization, its UUID, and an administrator of it who approves the driver's machine account. The driver
+  holds no token and no passphrase: it enrolls a [machine account](doc/configuration.md#identities).
+- for a custom `mount.image.tag` or driver image: retyc-cli v1.6.0-beta1 or later (machine accounts, `retyc machine
+  enroll`). The chart's defaults already use it.
 
 ## How to deploy RetycFS CSI driver to your cluster
 
@@ -36,17 +38,31 @@ Follow the instructions from the helm chart [README](charts/retycfs-csi/README.m
 The tl;dr is
 
 ```console
+$ kubectl create namespace retycfs-system
+$ kubectl label namespace retycfs-system pod-security.kubernetes.io/enforce=privileged
 $ helm repo add retyc https://retyc.github.io/retycfs-k8s-csi/
-$ helm install retycfs-csi retyc/retycfs-csi --namespace kube-system \
-    --set credentials.token=<token> \
-    --set credentials.keyPassphrase=<key passphrase>
+$ helm install retycfs-csi retyc/retycfs-csi --namespace retycfs-system \
+    --set identity.organizationID=<Retyc organization UUID>
 ```
 
-The controller pod must be `3/3 Running`, the node pods `2/2` (see [doc/troubleshooting.md](doc/troubleshooting.md)):
+The enroller requests a machine account for the cluster; `helm install` does not wait for it. The pods are ready at
+once, and the claims of the cluster-wide classes stay `Pending` until an administrator of the organization approves it,
+in Retyc (Organization > Machines) after comparing the fingerprint, or with the CLI:
 
 ```console
-$ kubectl -n kube-system get pods -l app.kubernetes.io/instance=retycfs-csi
+$ kubectl -n retycfs-system get retycidentity default -o wide      # PHASE Pending, FINGERPRINT XXXX-...
+$ retyc machine requests
+$ retyc machine approve <enrollment-id> --fingerprint XXXX-...
 ```
+
+Whether approved or not, the controller pod must be `3/3 Running`, the node pods `2/2` and the enroller `1/1`
+(see [doc/troubleshooting.md](doc/troubleshooting.md)):
+
+```console
+$ kubectl -n retycfs-system get pods -l app.kubernetes.io/instance=retycfs-csi
+```
+
+Without `identity.organizationID`, no cluster-wide identity exists and only the per-namespace ones are served (below).
 
 ### Test your environment
 
@@ -61,7 +77,7 @@ The reader prints the lines the writer appends. Check `retyc dataroom ls`, or th
 there, named after the volume. The volume's mount pod runs next to the driver:
 
 ```console
-$ kubectl -n kube-system get pods -l app.kubernetes.io/name=retycfs-mount
+$ kubectl -n retycfs-system get pods -l app.kubernetes.io/name=retycfs-mount
 ```
 
 Delete the test resources:
@@ -94,14 +110,20 @@ spec:
 
 - `retycfs-rwx`: deleting the claim deletes the dataroom;
 - `retycfs-rwx-retain`: deleting the claim keeps the dataroom;
-- `retycfs-rwx-tenant`: same, with the credentials of a `retycfs-credentials` Secret in the claim's namespace instead of
-  the cluster-wide ones (see [doc/configuration.md](doc/configuration.md#per-tenant-identities)).
+- `retycfs-rwx-tenant`: same, with the machine account of the claim's namespace instead of the cluster-wide one. The
+  namespace applies a `RetycIdentity` named `default` and has it approved first (see
+  [doc/configuration.md](doc/configuration.md#identities)). `retycfs-rwx` and `retycfs-rwx-retain` exist only with
+  `identity.organizationID`.
 
 The size requested is reserved on your plan, 20 GiB at least. Run the pods with `securityContext.runAsUser` set to the
 annotation's UID, and mount the volume with `mountPropagation: HostToContainer`, as in the examples: when a mount pod
 dies and is recreated, the pod then sees its volume come back without restarting (see
 [doc/architecture.md](doc/architecture.md#recovery)). The other annotations (cache, resources of the mount pod,
 read-only...) are in [doc/configuration.md](doc/configuration.md#pvc-annotations).
+
+A dataroom belongs to the machine account that created it. To add people to it at creation, use the
+`csi.retycfs.com/initial-members` annotation, and read
+[Dataroom lifecycle](doc/configuration.md#dataroom-lifecycle-and-ownership-transfer) before retiring an identity.
 
 Every pod mounting the claim, on any node, shares the same dataroom. It behaves like a network drive: `close` returns
 once the file is stored, a change made on one node shows up on the others within the cache TTL (one minute by
@@ -111,8 +133,8 @@ databases.
 ## Documentation
 
 - [charts/retycfs-csi/README.md](charts/retycfs-csi/README.md): chart values
-- [doc/configuration.md](doc/configuration.md): PVC annotations, static PVs, versioning, per-namespace credentials,
-  Redis cache, metrics
+- [doc/configuration.md](doc/configuration.md): PVC annotations, static PVs, versioning, identities, dataroom
+  ownership transfer, Redis cache, metrics
 - [doc/troubleshooting.md](doc/troubleshooting.md): mount pod logs, exit codes, events
 - [doc/architecture.md](doc/architecture.md): how it works, mount pods, recovery, consistency, security, limitations
 - [doc/testing.md](doc/testing.md): development environment and tests
@@ -123,7 +145,7 @@ databases.
 $ make build test lint     # driver
 $ make helm-lint           # chart
 $ make image               # container image
-$ vagrant up               # k3s in Vagrant VMs (.env: dev/prod chart, multi/single node), then: make image-dev vm-load vm-secret vm-helm
+$ vagrant up               # k3s in Vagrant VMs (.env: dev/prod chart, multi/single node), then: make image-dev vm-load vm-helm
 ```
 
 ## License

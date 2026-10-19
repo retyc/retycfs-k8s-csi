@@ -20,15 +20,15 @@ spec:
         {{- with .Values.controller.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      {{- with .Values.controller.podAnnotations }}
       annotations:
-        {{- if and .Values.credentials.create (not .Values.credentials.existingSecret) .Values.credentials.token }}
-        checksum/credentials: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
-        {{- end }}
-        {{- with .Values.controller.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-        {{- end }}
+      {{- end }}
     spec:
       serviceAccountName: {{ include "retycfs-csi.controller.serviceAccountName" . }}
+      # The controller finishes adding the initial members of a dataroom it just created (at most
+      # 5 minutes) before it exits; it exits at once when there are none.
+      terminationGracePeriodSeconds: 330
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -87,6 +87,7 @@ spec:
             - --endpoint=unix:///csi/csi.sock
             - --http-endpoint=:{{ .Values.healthPort }}
             - -v={{ .Values.logLevel }}
+            {{- include "retycfs-csi.identityArgs" . | nindent 12 }}
             {{- range .Values.controller.extraArgs }}
             - {{ . | quote }}
             {{- end }}
@@ -109,16 +110,24 @@ spec:
           env:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- include "retycfs-csi.credentialsEnvFrom" . | nindent 10 }}
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
+            {{- include "retycfs-csi.identityVolumeMount" . | nindent 12 }}
+            # Each retyc call gets the identity's keys in a 0700 directory here: memory, never disk.
+            - name: tmp
+              mountPath: /tmp
             {{- with .Values.controller.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
       volumes:
         - name: socket-dir
           emptyDir: {}
+        {{- include "retycfs-csi.identityVolume" . | nindent 8 }}
+        - name: tmp
+          # tmpfs: counts toward the memory of the container writing it.
+          emptyDir:
+            medium: Memory
         {{- with .Values.controller.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

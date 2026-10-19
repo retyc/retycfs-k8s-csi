@@ -2,9 +2,9 @@
 //
 // The two endpoints deliberately mean different things. /healthz only says "the process is up
 // and serving"; it backs the kubelet livenessProbe, and a failure there restarts the container.
-// On the node plugin, liveness must never trip on a transient condition. /readyz carries the real
-// diagnosis (Retyc credentials valid, volumes recovered) and backs the
-// readinessProbe, which only flips the pod to NotReady and records why.
+// On the node plugin, liveness must never trip on a transient condition. /readyz backs the
+// readinessProbe and runs the mode's Checker when there is one; the driver has none today (the
+// identities show on their RetycIdentity, so that `helm install --wait` never waits for an approval).
 package health
 
 import (
@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"sync"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -76,27 +75,4 @@ func ListenAndServe(ctx context.Context, addr string, handler http.Handler) erro
 	}
 
 	return nil
-}
-
-// Cached wraps check so it runs at most once per ttl; callers in between get the last result.
-// Meant for checks that cost an API round-trip (e.g. `retyc auth status`), which must not run
-// on every kubelet probe.
-func Cached(check Checker, ttl time.Duration) Checker {
-	var (
-		mu      sync.Mutex
-		last    error
-		checked time.Time
-	)
-
-	return func(ctx context.Context) error {
-		mu.Lock()
-		defer mu.Unlock()
-		if !checked.IsZero() && time.Since(checked) < ttl {
-			return last
-		}
-		last = check(ctx)
-		checked = time.Now()
-
-		return last
-	}
 }
