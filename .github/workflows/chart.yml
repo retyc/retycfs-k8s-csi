@@ -57,7 +57,7 @@ jobs:
 
       - name: Set up cosign
         if: steps.cr.outputs.changed_charts != ''
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Log in to GitHub Container Registry
         if: steps.cr.outputs.changed_charts != ''
