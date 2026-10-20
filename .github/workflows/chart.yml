@@ -18,6 +18,7 @@ jobs:
     permissions:
       contents: write
       packages: write
+      id-token: write # keyless cosign signing (Sigstore OIDC)
 
     steps:
       - uses: actions/checkout@v7
@@ -54,9 +55,16 @@ jobs:
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
 
+      - name: Set up cosign
+        if: steps.cr.outputs.changed_charts != ''
+        uses: sigstore/cosign-installer@v4
+
       - name: Log in to GitHub Container Registry
         if: steps.cr.outputs.changed_charts != ''
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # cosign reads the Docker credential store, not Helm's.
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       # Check remote version before bump chart 
       - name: Push to OCI registry
@@ -73,7 +81,16 @@ jobs:
               echo "oci://ghcr.io/retyc/charts/$name:$version already published, skipping"
               continue
             fi
-            helm push "$pkg" oci://ghcr.io/retyc/charts
+            out=$(helm push "$pkg" oci://ghcr.io/retyc/charts 2>&1)
+            echo "$out"
+            digest=$(echo "$out" | awk '/^Digest:/ { print $2; exit }')
+            if [ -z "$digest" ]; then
+              echo "::error::no digest in helm push output for $name:$version"
+              exit 1
+            fi
+            # Keyless signature (Sigstore, GitHub OIDC identity of this workflow), by digest so the
+            # tag cannot be swapped in between. Artifact Hub detects it through the OCI referrers API.
+            cosign sign --yes "ghcr.io/retyc/charts/$name@$digest"
           done
 
       # Artifact Hub reads an OCI repository's metadata (artifacthub-repo.yml) from its
