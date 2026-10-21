@@ -340,7 +340,7 @@ enroller:
 mount:
   image:
     repository: ghcr.io/retyc/retyc-cli
-    tag: v1.6.0-beta1
+    tag: v1.6.0
     pullPolicy: IfNotPresent
   # -- Pull secrets of the retyc-cli image, in the release namespace.
   imagePullSecrets: []
