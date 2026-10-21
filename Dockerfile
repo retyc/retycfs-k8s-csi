@@ -13,7 +13,7 @@ ARG CREATED=1970-01-01T00:00:00Z
 
 # Runs on the build host's architecture and cross-compiles (CGO is off, so Go needs nothing else):
 # a multi-platform build never runs the compiler under QEMU, and `go mod download` is shared.
-FROM --platform=$BUILDPLATFORM golang:1.26.9-trixie AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.10-trixie AS builder
 
 WORKDIR /src
 COPY go.mod go.sum ./
