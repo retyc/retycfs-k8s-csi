@@ -12,16 +12,23 @@ its own: the controller, the enroller and the node plugin read the Secrets of th
 ```sh
 kubectl create namespace retycfs-system
 kubectl label namespace retycfs-system pod-security.kubernetes.io/enforce=privileged
+```
+
+Then install from the Helm repository:
+
+```sh
 helm repo add retyc https://retyc.github.io/retycfs-k8s-csi
 helm install retycfs-csi retyc/retycfs-csi \
   --namespace retycfs-system \
   --set identity.organizationID=<Retyc organization UUID>
 ```
 
-From the OCI registry (`--version` selects a chart version; omit it for the latest):
+Or from the OCI registry (`--version` selects a chart version; omit it for the latest):
 
 ```sh
-helm install retycfs-csi oci://ghcr.io/retyc/charts/retycfs-csi --version <chart version> -n retycfs-system ...
+helm install retycfs-csi oci://ghcr.io/retyc/charts/retycfs-csi --version <chart version> \
+  --namespace retycfs-system \
+  --set identity.organizationID=<Retyc organization UUID>
 ```
 
 There is no token or passphrase to give. With `identity.organizationID`, the enroller creates the `RetycIdentity`
