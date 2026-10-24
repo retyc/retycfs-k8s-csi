@@ -22,12 +22,21 @@
       ReadWriteMany Kubernetes volumes backed by end-to-end encrypted Retyc storage.</p>
 
     <h2>Install</h2>
-    <pre><code>helm repo add retyc https://retyc.github.io/retycfs-k8s-csi
+    <p>The driver runs privileged mount pods: give it a namespace of its own that allows privileged pods
+      (Pod Security <code>privileged</code>).</p>
+    <pre><code>kubectl create namespace retycfs-system
+kubectl label namespace retycfs-system pod-security.kubernetes.io/enforce=privileged
+helm repo add retyc https://retyc.github.io/retycfs-k8s-csi
 helm repo update
-helm install retycfs-csi retyc/retycfs-csi --namespace kube-system</code></pre>
+helm install retycfs-csi retyc/retycfs-csi --namespace retycfs-system \
+  --set identity.organizationID=&lt;Retyc organization UUID&gt;</code></pre>
 
     <p>Or from the OCI registry:</p>
-    <pre><code>helm install retycfs-csi oci://ghcr.io/retyc/charts/retycfs-csi --namespace kube-system</code></pre>
+    <pre><code>helm install retycfs-csi oci://ghcr.io/retyc/charts/retycfs-csi --namespace retycfs-system \
+  --set identity.organizationID=&lt;Retyc organization UUID&gt;</code></pre>
+
+    <p>An administrator of the organization then approves the driver's machine account in Retyc
+      (Organization &gt; Machines, or <code>retyc machine approve</code>) after comparing its fingerprint.</p>
 
     <p>Values and configuration: <a href="https://github.com/retyc/retycfs-k8s-csi/tree/master/charts/retycfs-csi">chart README</a>.
       Repository index: <a href="index.yaml">index.yaml</a>.</p>
