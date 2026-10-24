@@ -152,6 +152,40 @@ entries:
       artifacthub.io/category: storage
       artifacthub.io/license: MIT
     apiVersion: v2
+    appVersion: v0.6.1
+    created: "2026-10-24T05:59:22.097270456Z"
+    dependencies:
+    - condition: cache.redis.subchart.enabled
+      name: redis
+      repository: oci://registry-1.docker.io/cloudpirates
+      version: 0.37.2
+    description: Kubernetes CSI driver for Retyc datarooms - ReadWriteMany volumes
+      with end-to-end post-quantum encryption
+    digest: 0061e4dd804b6a0aeebc8c72bb7e26b843a3182bb70f5c1fc2ae766ae7b0130d
+    home: https://retyc.com
+    keywords:
+    - csi
+    - storage
+    - retyc
+    - retycfs
+    - dataroom
+    - readwritemany
+    - encryption
+    kubeVersion: '>=1.34.0-0'
+    maintainers:
+    - name: Retyc
+      url: https://retyc.com
+    name: retycfs-csi
+    sources:
+    - https://github.com/retyc/retycfs-k8s-csi
+    type: application
+    urls:
+    - https://github.com/retyc/retycfs-k8s-csi/releases/download/retycfs-csi-0.6.1/retycfs-csi-0.6.1.tgz
+    version: 0.6.1
+  - annotations:
+      artifacthub.io/category: storage
+      artifacthub.io/license: MIT
+    apiVersion: v2
     appVersion: v0.6.0
     created: "2026-10-19T13:57:06.65712127Z"
     dependencies:
@@ -284,4 +318,4 @@ entries:
     urls:
     - https://github.com/retyc/retycfs-k8s-csi/releases/download/retycfs-csi-0.5.0/retycfs-csi-0.5.0.tgz
     version: 0.5.0
-generated: "2026-10-19T13:57:06.657142059Z"
+generated: "2026-10-24T05:59:22.097289755Z"
