@@ -1,7 +1,7 @@
 # The retyc-cli release embedded in the image — the single source of truth for that version.
 # Bump it here (Dependabot proposes it); `make image RETYC_CLI_VERSION=...` overrides for a
 # one-off build. It must match the mount pods' image in the chart's values.yaml.
-ARG RETYC_CLI_VERSION=v0.6.0
+ARG RETYC_CLI_VERSION=v1.6.0
 # Registry/repository of the retyc-cli image; `make image RETYC_CLI_IMAGE=...` overrides it (e.g.
 # the development CLI, ghcr.io/retyc/retyc-cli-dev: make image-dev).
 ARG RETYC_CLI_IMAGE=ghcr.io/retyc/retyc-cli
