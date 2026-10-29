@@ -11,20 +11,20 @@ when a node mounts the volume: a change applies at the next mount of the volume 
 pod (see [architecture.md](architecture.md#settings-read-at-stage)). `csi.retycfs.com/uid` is also checked by
 `CreateVolume`, and `initial-members` is read there only.
 
-| Annotation | Required | Value | Effect |
-|------------|----------|-------|--------|
-| `csi.retycfs.com/uid` | **yes** | integer, 0 to 4294967295 (`"0"` for root, written explicitly) | owner UID of every file (`--uid`): the UID the pods must run as to write |
-| `csi.retycfs.com/gid` | no, defaults to the UID | integer | owner GID (`--gid`) |
-| `csi.retycfs.com/cache-ttl` | no | positive Go duration (`30s`, `5m`, `1h30m`) | how long listings and names are cached (`--cache-ttl`); without it, the CLI's default (1 min) |
-| `csi.retycfs.com/background-delete` | no | `true` / `false` | `unlink` returns at once and the delete is sent afterwards (`--background-delete`): much faster `rm -r`, but a successful `rm` no longer proves the file is gone on the server, and deletes not sent at unstage count as lost writes |
-| `csi.retycfs.com/unsafe-write` | no | `true` / `false` | the API acknowledges an upload before the chunk is stored (`--unsafe-write`): faster `close`, but a store that fails afterwards is reported to nobody |
-| `csi.retycfs.com/read-only` | no | `true` / `false` | mounts read-only whatever the identity's role (`--read-only`) |
-| `csi.retycfs.com/local-file` | no | patterns separated by spaces, or `none` alone | names of files kept in the mount pod's spool and never sent (`--local-file`); replaces the CLI's default `.*.swp .*.swx *~ 4913`; `none` sends every file, and cannot be combined with patterns |
-| `csi.retycfs.com/mount-cpu-request` | no | positive Kubernetes quantity (`100m`) | CPU request of the volume's mount pods |
-| `csi.retycfs.com/mount-cpu-limit` | no | quantity | CPU limit (none by default) |
-| `csi.retycfs.com/mount-memory-request` | no | quantity (`512Mi`) | memory request |
-| `csi.retycfs.com/mount-memory-limit` | no | quantity | memory limit |
-| `csi.retycfs.com/initial-members` | no | `alice@acme.fr:admin,bob@acme.fr:editor,carol@acme.fr`: comma-separated e-mail addresses, each optionally followed by `:admin`, `:editor` or `:viewer` (the default) | people added to the dataroom when the driver creates it. See [Initial members](#initial-members) |
+| Annotation                             | Required                | Value                                                                                                                                                                | Effect                                                                                                                                                                                                                               |
+|----------------------------------------|-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `csi.retycfs.com/uid`                  | **yes**                 | integer, 0 to 4294967295 (`"0"` for root, written explicitly)                                                                                                        | owner UID of every file (`--uid`): the UID the pods must run as to write                                                                                                                                                             |
+| `csi.retycfs.com/gid`                  | no, defaults to the UID | integer                                                                                                                                                              | owner GID (`--gid`)                                                                                                                                                                                                                  |
+| `csi.retycfs.com/cache-ttl`            | no                      | positive Go duration (`30s`, `5m`, `1h30m`)                                                                                                                          | how long listings and names are cached (`--cache-ttl`); without it, the CLI's default (1 min)                                                                                                                                        |
+| `csi.retycfs.com/background-delete`    | no                      | `true` / `false`                                                                                                                                                     | `unlink` returns at once and the delete is sent afterwards (`--background-delete`): much faster `rm -r`, but a successful `rm` no longer proves the file is gone on the server, and deletes not sent at unstage count as lost writes |
+| `csi.retycfs.com/unsafe-write`         | no                      | `true` / `false`                                                                                                                                                     | the API acknowledges an upload before the chunk is stored (`--unsafe-write`): faster `close`, but a store that fails afterwards is reported to nobody                                                                                |
+| `csi.retycfs.com/read-only`            | no                      | `true` / `false`                                                                                                                                                     | mounts read-only whatever the identity's role (`--read-only`)                                                                                                                                                                        |
+| `csi.retycfs.com/local-file`           | no                      | patterns separated by spaces, or `none` alone                                                                                                                        | names of files kept in the mount pod's spool and never sent (`--local-file`); replaces the CLI's default `.*.swp .*.swx *~ 4913`; `none` sends every file, and cannot be combined with patterns                                      |
+| `csi.retycfs.com/mount-cpu-request`    | no                      | positive Kubernetes quantity (`100m`)                                                                                                                                | CPU request of the volume's mount pods                                                                                                                                                                                               |
+| `csi.retycfs.com/mount-cpu-limit`      | no                      | quantity                                                                                                                                                             | CPU limit (none by default)                                                                                                                                                                                                          |
+| `csi.retycfs.com/mount-memory-request` | no                      | quantity (`512Mi`)                                                                                                                                                   | memory request                                                                                                                                                                                                                       |
+| `csi.retycfs.com/mount-memory-limit`   | no                      | quantity                                                                                                                                                             | memory limit                                                                                                                                                                                                                         |
+| `csi.retycfs.com/initial-members`      | no                      | `alice@acme.fr:admin,bob@acme.fr:editor,carol@acme.fr`: comma-separated e-mail addresses, each optionally followed by `:admin`, `:editor` or `:viewer` (the default) | people added to the dataroom when the driver creates it. See [Initial members](#initial-members)                                                                                                                                     |
 
 Example:
 
@@ -38,21 +38,21 @@ metadata:
     csi.retycfs.com/cache-ttl: 30s
     csi.retycfs.com/mount-memory-limit: 1Gi
 spec:
-  accessModes: [ReadWriteMany]
+  accessModes: [ ReadWriteMany ]
   storageClassName: retycfs-rwx
   resources:
     requests:
       storage: 20Gi
 ---
 # ... in the pods using it:
-    securityContext:
-      runAsUser: 1000          # the claim's csi.retycfs.com/uid, or no write
-      runAsGroup: 1000
-    containers:
-      - volumeMounts:
-          - name: data
-            mountPath: /data
-            mountPropagation: HostToContainer   # sees the volume again after a mount pod died
+securityContext:
+  runAsUser: 1000          # the claim's csi.retycfs.com/uid, or no write
+  runAsGroup: 1000
+containers:
+  - volumeMounts:
+      - name: data
+        mountPath: /data
+        mountPropagation: HostToContainer   # sees the volume again after a mount pod died
 ```
 
 What to know:
@@ -105,16 +105,19 @@ The mount settings of a static PV are read from its `volumeAttributes`, with the
 well: they then win over `volumeAttributes`. Without them, only `volumeAttributes` count (on a tenant class they are
 required, see below). The chart's admission policy
 requires `csi.retycfs.com/uid` on the claim of a static PV on its classes, so put it on both. Fill in and apply
-[`examples/manifests/static-pv.yaml`](../examples/manifests/static-pv.yaml), with `persistentVolumeReclaimPolicy: Retain`: the provisioner
+[`examples/manifests/static-pv.yaml`](../examples/manifests/static-pv.yaml), with
+`persistentVolumeReclaimPolicy: Retain`: the provisioner
 never deletes volumes it did not create.
 
 **A static PV of a tenant class needs its own `nodeStageSecretRef`.** kubelet takes the node-stage secret from the PV,
 not from the StorageClass: the provisioner copies it there for the volumes it creates, but a static PV only has what
 you write. Without it, kubelet stages the volume with no credentials, and the driver would fall back to its
 cluster-wide identity, another Retyc machine than the tenant's. So when a stage comes without secrets, the node plugin
-reads every PV of the driver with the volume handle (the claim's own PV first) and their StorageClasses, and refuses with `FailedPrecondition` if the class declares
+reads every PV of the driver with the volume handle (the claim's own PV first) and their StorageClasses, and refuses
+with `FailedPrecondition` if the class declares
 `csi.storage.k8s.io/node-stage-secret-name`, or if the PV itself names a node-stage secret kubelet did not send. The
-consumer pod then stays in `ContainerCreating` with that message. Name the tenant's identity Secret in the PV, which lives in the driver's namespace, and the claim in
+consumer pod then stays in `ContainerCreating` with that message. Name the tenant's identity Secret in the PV, which
+lives in the driver's namespace, and the claim in
 `volumeAttributes`: the node plugin checks that the identity was enrolled for the claim's namespace, and refuses a
 tenant identity with no claim (`FailedPrecondition ... names no claim namespace`):
 
@@ -166,11 +169,11 @@ file deletes its older versions. For a tenant class, the resizer authenticates w
 
 The chart ships three classes (`storageClasses` value), all with `allowVolumeExpansion: true`:
 
-| Name | Identity | `reclaimPolicy` | `volumeBindingMode` |
-|------|----------|-----------------|---------------------|
-| `retycfs-rwx` | cluster-wide | `Delete` | `Immediate` |
-| `retycfs-rwx-retain` | cluster-wide | `Retain` | `Immediate` |
-| `retycfs-rwx-tenant` | the claim's namespace | `Retain` | `Immediate` |
+| Name                 | Identity              | `reclaimPolicy` | `volumeBindingMode` |
+|----------------------|-----------------------|-----------------|---------------------|
+| `retycfs-rwx`        | cluster-wide          | `Delete`        | `Immediate`         |
+| `retycfs-rwx-retain` | cluster-wide          | `Retain`        | `Immediate`         |
+| `retycfs-rwx-tenant` | the claim's namespace | `Retain`        | `Immediate`         |
 
 The classes without `tenant: true` are only rendered when a cluster-wide identity is configured
 (`identity.organizationID`). The driver
@@ -196,11 +199,11 @@ chart, the values or the cluster's users.
 
 There are two kinds, the same object:
 
-| | Cluster-wide | Tenant |
-|---|---|---|
-| `RetycIdentity` | `default`, in the driver's namespace, created by the enroller when `identity.organizationID` is set | `default`, in the tenant's namespace, applied by the tenant |
-| Secret (driver's namespace) | `retycfs-identity` | `retycfs-identity-<namespace>` |
-| Used by | `retycfs-rwx`, `retycfs-rwx-retain` | `retycfs-rwx-tenant` |
+|                             | Cluster-wide                                                                                        | Tenant                                                      |
+|-----------------------------|-----------------------------------------------------------------------------------------------------|-------------------------------------------------------------|
+| `RetycIdentity`             | `default`, in the driver's namespace, created by the enroller when `identity.organizationID` is set | `default`, in the tenant's namespace, applied by the tenant |
+| Secret (driver's namespace) | `retycfs-identity`                                                                                  | `retycfs-identity-<namespace>`                              |
+| Used by                     | `retycfs-rwx`, `retycfs-rwx-retain`                                                                 | `retycfs-rwx-tenant`                                        |
 
 ### The RetycIdentity
 
@@ -210,7 +213,7 @@ kind: RetycIdentity
 metadata:
   name: default          # imposed: one per namespace
   namespace: team-a
-spec:                    # optional
+spec: # optional
   organizationID: <Retyc organization UUID>
   displayName: team-a    # name of the machine in Retyc, default <identity.clusterName>/<namespace>; no "/"
 ```
@@ -232,7 +235,7 @@ spec:                    # optional
    ```
 
    | Column | |
-   |---|---|
+      |---|---|
    | `PHASE` | `Pending`, `Approved`, `Denied`, `Expired`, `Rejected` or `Blocked` |
    | `FINGERPRINT` | the request's fingerprint, to compare before approving |
    | `ACTIVE` | once approved, whether Retyc still accepts the machine (`False`: disabled or deleted there, checked every 5 minutes) |
@@ -240,7 +243,8 @@ spec:                    # optional
    | `MACHINE` | the machine ID in Retyc, once approved |
    | `APPROVAL` (`-o wide`) | where an administrator approves |
 
-2. An **administrator of the Retyc organization** compares the fingerprint with the one the cluster shows, then approves,
+2. An **administrator of the Retyc organization** compares the fingerprint with the one the cluster shows, then
+   approves,
    in Retyc (Organization > Machines) or with the CLI:
 
    ```sh
@@ -254,22 +258,24 @@ spec:                    # optional
 
 3. The enroller stores the keys in the identity's Secret. The phase becomes `Approved`.
 
-| Phase | Meaning | What to do |
-|-------|---------|------------|
-| `Pending` | request awaiting approval (it lives 15 minutes; the enroller sends a new one when it expires) | approve it |
-| `Approved` | the machine is enrolled; the condition `Active` tells whether Retyc still accepts it | |
-| `Expired` | four requests in a row, 15 minutes each, went unanswered | `kubectl -n <ns> annotate retycidentity default csi.retycfs.com/retry=$(date +%s) --overwrite` starts a new series |
-| `Denied` | an administrator refused the request. Terminal | delete and recreate the `RetycIdentity` |
+| Phase      | Meaning                                                                                                                          | What to do                                                                                                                                                                                                                            |
+|------------|----------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Pending`  | request awaiting approval (it lives 15 minutes; the enroller sends a new one when it expires)                                    | approve it                                                                                                                                                                                                                            |
+| `Approved` | the machine is enrolled; the condition `Active` tells whether Retyc still accepts it                                             |                                                                                                                                                                                                                                       |
+| `Expired`  | four requests in a row, 15 minutes each, went unanswered                                                                         | `kubectl -n <ns> annotate retycidentity default csi.retycfs.com/retry=$(date +%s) --overwrite` starts a new series                                                                                                                    |
+| `Denied`   | an administrator refused the request. Terminal                                                                                   | delete and recreate the `RetycIdentity`                                                                                                                                                                                               |
 | `Rejected` | no organization (`spec.organizationID` and `identity.organizationID` both empty), or Retyc refused the configuration (exit `78`) | no organization: set `identity.organizationID` on the chart (the next pass enrolls) or recreate the `RetycIdentity` with `spec.organizationID` (it cannot be added later). Configuration refused: fix it, then the `retry` annotation |
-| `Blocked` | the Secret of an older identity of that namespace, still used by PVs, is in the way (see below) | see [Namespace deleted and recreated](#namespace-deleted-and-recreated) |
+| `Blocked`  | the Secret of an older identity of that namespace, still used by PVs, is in the way (see below)                                  | see [Namespace deleted and recreated](#namespace-deleted-and-recreated)                                                                                                                                                               |
 
 `kubectl describe retycidentity default` and the namespace's Events carry the details. A tenant's PVC created before the
 approval stays `Pending`, with an Event giving the fingerprint to compare.
 
 The `Active` condition comes from `retyc auth status` run as the machine every 5 minutes. A machine **disabled or
-deleted in Retyc** sets `Active=False` (reason `MachineRefused`): its mounts fail with exit `77`. The machine cannot tell the two
+deleted in Retyc** sets `Active=False` (reason `MachineRefused`): its mounts fail with exit `77`. The machine cannot
+tell the two
 apart; an administrator can (Organization > Machines, or `retyc machine ls`). Disabled: once it is enabled again, the
-mount pods try again by themselves within 15 minutes. Deleted: delete the `RetycIdentity` to enroll a new one. Exit `78` is a configuration error
+mount pods try again by themselves within 15 minutes. Deleted: delete the `RetycIdentity` to enroll a new one. Exit `78`
+is a configuration error
 (see [troubleshooting.md](troubleshooting.md#exit-codes-of-a-mount-pod)).
 
 ### Cluster-wide identity
@@ -281,7 +287,8 @@ helm install retycfs-csi retyc/retycfs-csi --namespace retycfs-system --set iden
 ```
 
 The enroller creates the `RetycIdentity` `default` of `retycfs-system` itself. Until it is approved, the claims of
-`retycfs-rwx*` wait (`Pending`, with an Event that gives the fingerprint); the pods of the driver are ready all the same,
+`retycfs-rwx*` wait (`Pending`, with an Event that gives the fingerprint); the pods of the driver are ready all the
+same,
 so that `helm install --wait` does not wait for the approval. Deleting the object enrolls a new machine
 (a new request); the former one stays in Retyc until it is disabled there. Changing `identity.organizationID` later
 does not move the existing object (`organizationID` is immutable): delete it, and the enroller recreates it in the new
@@ -305,7 +312,8 @@ parameters:
 A tenant applies a `RetycIdentity` `default` in its namespace (with or without `spec.organizationID`, depending on
 `identity.organizationID`), has it approved, and its claims on the class are provisioned by its own machine. The
 provisioner reads the Secret for `CreateVolume` and `DeleteVolume`, the resizer for expansion and VolumeAttributesClass
-changes, kubelet for `NodeStageVolume`. The tenant never reads the Secret, which sits in a namespace it has no access to.
+changes, kubelet for `NodeStageVolume`. The tenant never reads the Secret, which sits in a namespace it has no access
+to.
 
 What to know before rolling it out:
 
@@ -335,7 +343,8 @@ no other Secret than `retycfs-identity` and `retycfs-identity-*`. Members of `sy
 controller (deleting a namespace) pass. A cluster administrator outside `system:masters` who must repair a Secret by
 hand disables `admissionPolicy` for the time of the repair. This policy always fails closed.
 
-Examples, with a namespace, its `RetycIdentity`, a claim and two pods: [`examples/manifests/tenant.yaml`](../examples/manifests/tenant.yaml).
+Examples, with a namespace, its `RetycIdentity`, a claim and two pods: [
+`examples/manifests/tenant.yaml`](../examples/manifests/tenant.yaml).
 
 ## Dataroom lifecycle and ownership transfer
 
@@ -353,7 +362,8 @@ cluster's for the other classes. A machine cannot be removed from Retyc while it
    ```
 
 3. **Delete the claims and PVs.** With `Retain` the dataroom stays in Retyc. Then delete the `RetycIdentity`
-   (`kubectl -n <ns> delete retycidentity default`): the enroller deletes the Secret at once when no PV uses it; otherwise it keeps it, and its sweep (at startup, then
+   (`kubectl -n <ns> delete retycidentity default`): the enroller deletes the Secret at once when no PV uses it;
+   otherwise it keeps it, and its sweep (at startup, then
    every hour) removes it once the last PV is gone.
 4. **Remove the machine** in Retyc:
 
@@ -370,11 +380,13 @@ to it, then a static PV adopts the dataroom (see [Static PVs](#static-pvs)).
 
 ## Uninstall
 
-`helm uninstall` removes the enroller, but every `RetycIdentity` carries the finalizer `csi.retycfs.com/identity` and the
+`helm uninstall` removes the enroller, but every `RetycIdentity` carries the finalizer `csi.retycfs.com/identity` and
+the
 CRD is kept (`helm.sh/resource-policy: keep`). Without an enroller, deleting a `RetycIdentity` or a tenant namespace
 stays `Terminating`. Remove the identities first:
 
-1. **Handle the datarooms to keep**: see [Dataroom lifecycle and ownership transfer](#dataroom-lifecycle-and-ownership-transfer).
+1. **Handle the datarooms to keep**:
+   see [Dataroom lifecycle and ownership transfer](#dataroom-lifecycle-and-ownership-transfer).
 2. **Delete the PVCs and PVs.**
 3. **Delete the identities** and wait until they are gone (the enroller deletes the Secrets no PV references any more,
    then removes the finalizer; a Secret still referenced waits for the sweep, at startup then every hour, after its PVs
@@ -388,7 +400,8 @@ stays `Terminating`. Remove the identities first:
 4. **Uninstall the chart**: `helm uninstall <release> -n <driver-namespace>`.
 5. **Clean the driver namespace**: delete the remaining `retycfs-identity*` Secrets and, if wanted, the CRD
    (`kubectl delete crd retycidentities.csi.retycfs.com`).
-6. **In Retyc**, disable and remove the machines (`retyc machine disable <machine-id>`, `retyc machine rm <machine-id>`).
+6. **In Retyc**, disable and remove the machines (`retyc machine disable <machine-id>`,
+   `retyc machine rm <machine-id>`).
 
 If an identity is stuck (enroller already gone), remove the finalizer by hand. The Secret is then not cleaned up:
 
@@ -402,12 +415,12 @@ The main ones; the full list is in the chart's README.
 
 ### Identity
 
-| Value | Default | Description |
-|-------|---------|-------------|
-| `identity.organizationID` | `""` | UUID of the Retyc organization of the cluster-wide identity. Set, the enroller creates the `RetycIdentity` `default` of the release namespace, and `retycfs-rwx` and `retycfs-rwx-retain` are rendered. Also the organization of the tenants' `RetycIdentity` without `spec.organizationID` |
-| `identity.clusterName` | `kubernetes` | prefix of the machines' default display name in Retyc, `<clusterName>/<namespace>` |
-| `enroller.*` | | the enroller's resources (32 MiB requested, 256 MiB limit), scheduling, `extraEnv`, `extraVolumes`, `hostAliases` and `extraArgs` |
-| `serviceAccount.enroller.*` | create | the identity policy only lets this service account write the identities' Secrets |
+| Value                       | Default      | Description                                                                                                                                                                                                                                                                                 |
+|-----------------------------|--------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `identity.organizationID`   | `""`         | UUID of the Retyc organization of the cluster-wide identity. Set, the enroller creates the `RetycIdentity` `default` of the release namespace, and `retycfs-rwx` and `retycfs-rwx-retain` are rendered. Also the organization of the tenants' `RetycIdentity` without `spec.organizationID` |
+| `identity.clusterName`      | `kubernetes` | prefix of the machines' default display name in Retyc, `<clusterName>/<namespace>`                                                                                                                                                                                                          |
+| `enroller.*`                |              | the enroller's resources (32 MiB requested, 256 MiB limit), scheduling, `extraEnv`, `extraVolumes`, `hostAliases` and `extraArgs`                                                                                                                                                           |
+| `serviceAccount.enroller.*` | create       | the identity policy only lets this service account write the identities' Secrets                                                                                                                                                                                                            |
 
 Both optional: without `identity.organizationID`, the StorageClasses without `tenant: true` are not installed, only
 per-namespace identities are served, and NOTES says so. See [Identities](#identities).
@@ -421,31 +434,31 @@ config directory.
 
 ### Mount pods
 
-| Value | Default | Description |
-|-------|---------|-------------|
-| `mount.image.repository` / `tag` / `pullPolicy` | `ghcr.io/retyc/retyc-cli`, the Dockerfile's `RETYC_CLI_VERSION` | image of the mount pods; CI checks it matches the controller's embedded CLI |
-| `mount.imagePullSecrets` | `[]` | in the driver's namespace |
-| `mount.resources` | 50m and 96Mi requested, 384Mi limit | default resources, overridden per claim by the `csi.retycfs.com/mount-*` annotations; raise the memory limit for large trees (see [architecture.md](architecture.md#mount-pods)) |
-| `mount.drainTimeout` | `5m` | `--drain-timeout`: how long a stopping mount pod may take to send its pending writes; the pod's grace period is 10 s more |
-| `mount.spoolDir` | `/var/lib/retycfs-csi/spool` | host directory of the spools, one subdirectory per volume, files in cleartext until sent |
-| `mount.priorityClassName` | `""` (`system-node-critical`) | |
-| `mount.extraEnv` | `[]` | extra variables of the CLI, after the driver's: they can override `RETYC_*` settings such as `RETYC_API_BASE_URL` or `RETYC_API_CONCURRENCY_UPLOAD` |
-| `mount.hostAliases` | `[]` | extra `/etc/hosts` entries |
-| `mount.hostPID` | `false` | host PID namespace; not needed (kept for diagnosis) |
+| Value                                           | Default                                                         | Description                                                                                                                                                                      |
+|-------------------------------------------------|-----------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `mount.image.repository` / `tag` / `pullPolicy` | `ghcr.io/retyc/retyc-cli`, the Dockerfile's `RETYC_CLI_VERSION` | image of the mount pods; CI checks it matches the controller's embedded CLI                                                                                                      |
+| `mount.imagePullSecrets`                        | `[]`                                                            | in the driver's namespace                                                                                                                                                        |
+| `mount.resources`                               | 50m and 96Mi requested, 384Mi limit                             | default resources, overridden per claim by the `csi.retycfs.com/mount-*` annotations; raise the memory limit for large trees (see [architecture.md](architecture.md#mount-pods)) |
+| `mount.drainTimeout`                            | `5m`                                                            | `--drain-timeout`: how long a stopping mount pod may take to send its pending writes; the pod's grace period is 10 s more                                                        |
+| `mount.spoolDir`                                | `/var/lib/retycfs-csi/spool`                                    | host directory of the spools, one subdirectory per volume, files in cleartext until sent                                                                                         |
+| `mount.priorityClassName`                       | `""` (`system-node-critical`)                                   |                                                                                                                                                                                  |
+| `mount.extraEnv`                                | `[]`                                                            | extra variables of the CLI, after the driver's: they can override `RETYC_*` settings such as `RETYC_API_BASE_URL` or `RETYC_API_CONCURRENCY_UPLOAD`                              |
+| `mount.hostAliases`                             | `[]`                                                            | extra `/etc/hosts` entries                                                                                                                                                       |
+| `mount.hostPID`                                 | `false`                                                         | host PID namespace; not needed (kept for diagnosis)                                                                                                                              |
 
 The chart writes these settings into the `<release>-mount-config` ConfigMap (`mount.json`), which the node plugin reads
 at start; a change rolls the node plugin, cuts no mount, and applies to the mount pods created from then on.
 
 ### Cache
 
-| Value | Default | Description |
-|-------|---------|-------------|
-| `cache.store` | `memory` | `memory`: one cache per mount pod; `redis`: one Redis shared by every mount pod of the cluster |
-| `cache.highConfidentiality` | `false` | `--cache-redis-high-confidentiality`: Redis holds only ciphertexts (about 19 MB per 10,000 files instead of 2.3 MB, plus a decryption per name on each pod). Set it with several tenants on one Redis |
-| `cache.redis.subchart.enabled` | `false` | deploy the CloudPirates Redis chart (standalone, no persistence, `maxmemory` with `allkeys-lru`, values under `redis`); only with `cache.store: redis` |
-| `cache.redis.subchart.password` | `""` | Redis password (letters, digits, `-._~`); empty generates one at install and keeps it across upgrades |
-| `cache.redis.subchart.existingSecret` | `""` | a Secret you manage instead, with the keys `redis-password` (the password) and `RETYC_CACHE_REDIS_URL` (`redis://:<password>@<release>-redis:6379`); the chart then creates no Redis Secret |
-| `cache.redis.external.url` / `existingSecret` / `existingSecretKey` | | your own Redis (7.4 or later, standalone, `rediss://` for TLS), as a URL the chart stores in a Secret, or an existing Secret |
+| Value                                                               | Default  | Description                                                                                                                                                                                           |
+|---------------------------------------------------------------------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `cache.store`                                                       | `memory` | `memory`: one cache per mount pod; `redis`: one Redis shared by every mount pod of the cluster                                                                                                        |
+| `cache.highConfidentiality`                                         | `false`  | `--cache-redis-high-confidentiality`: Redis holds only ciphertexts (about 19 MB per 10,000 files instead of 2.3 MB, plus a decryption per name on each pod). Set it with several tenants on one Redis |
+| `cache.redis.subchart.enabled`                                      | `false`  | deploy the CloudPirates Redis chart (standalone, no persistence, `maxmemory` with `allkeys-lru`, values under `redis`); only with `cache.store: redis`                                                |
+| `cache.redis.subchart.password`                                     | `""`     | Redis password (letters, digits, `-._~`); empty generates one at install and keeps it across upgrades                                                                                                 |
+| `cache.redis.subchart.existingSecret`                               | `""`     | a Secret you manage instead, with the keys `redis-password` (the password) and `RETYC_CACHE_REDIS_URL` (`redis://:<password>@<release>-redis:6379`); the chart then creates no Redis Secret           |
+| `cache.redis.external.url` / `existingSecret` / `existingSecretKey` |          | your own Redis (7.4 or later, standalone, `rediss://` for TLS), as a URL the chart stores in a Secret, or an existing Secret                                                                          |
 
 The Redis URL never goes into the ConfigMap: the node plugin reads it from a Secret (`RETYC_CACHE_REDIS_URL`) and copies
 it into each mount pod's own Secret.
@@ -461,10 +474,10 @@ A complete Redis setup (subchart, high confidentiality, sizing, or your own Redi
 
 ### Admission policy
 
-| Value | Default | Description |
-|-------|---------|-------------|
-| `admissionPolicy.enabled` | `true` | `ValidatingAdmissionPolicy` and binding on the claims of the chart's StorageClasses |
-| `admissionPolicy.failurePolicy` | `Fail` | `Fail` or `Ignore`: what the API server does when the policy cannot be evaluated |
+| Value                           | Default | Description                                                                         |
+|---------------------------------|---------|-------------------------------------------------------------------------------------|
+| `admissionPolicy.enabled`       | `true`  | `ValidatingAdmissionPolicy` and binding on the claims of the chart's StorageClasses |
+| `admissionPolicy.failurePolicy` | `Fail`  | `Fail` or `Ignore`: what the API server does when the policy cannot be evaluated    |
 
 The policy refuses, with the reason, a claim without `csi.retycfs.com/uid`, an update that removes it, and any
 `csi.retycfs.com/*` annotation whose value the driver would refuse. It is evaluated inside the API server (no webhook,
@@ -478,11 +491,11 @@ invalid claim at `CreateVolume` (`InvalidArgument`) or at stage.
 
 ### Controller
 
-| Value | Default | Description |
-|-------|---------|-------------|
-| `controller.replicas` | `1` | above 1, `--leader-election` is added to csi-provisioner and csi-resizer (with a Role on leases): one replica works, the others wait |
-| `controller.affinity` / `topologySpreadConstraints` | `{}` / `[]` | spread the replicas (an anti-affinity example is in `values.yaml`) |
-| `controller.extraEnv` / `extraVolumes` / `hostAliases` | | egress proxy, private CA bundle, extra hosts |
+| Value                                                  | Default     | Description                                                                                                                          |
+|--------------------------------------------------------|-------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `controller.replicas`                                  | `1`         | above 1, `--leader-election` is added to csi-provisioner and csi-resizer (with a Role on leases): one replica works, the others wait |
+| `controller.affinity` / `topologySpreadConstraints`    | `{}` / `[]` | spread the replicas (an anti-affinity example is in `values.yaml`)                                                                   |
+| `controller.extraEnv` / `extraVolumes` / `hostAliases` |             | egress proxy, private CA bundle, extra hosts                                                                                         |
 
 ### Namespace
 
@@ -494,50 +507,52 @@ kubectl create namespace retycfs-system
 kubectl label namespace retycfs-system pod-security.kubernetes.io/enforce=privileged
 ```
 
-Avoid `kube-system`: the controller, the enroller and the node plugin read the Secrets of their namespace, which hold every machine
+Avoid `kube-system`: the controller, the enroller and the node plugin read the Secrets of their namespace, which hold
+every machine
 account's keys, and `kube-system` usually has many other readers (NOTES warns).
 
 ## Driver flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--mode` | | `controller`, `node` or `enroller` (required) |
-| `--endpoint` | `unix:///csi/csi.sock` | CSI gRPC endpoint; only `unix://` is supported |
-| `--retyc-bin` | `retyc` | path to the `retyc` CLI binary (controller) |
-| `--http-endpoint` | `:9808` | address of the `/healthz`, `/readyz` and `/metrics` endpoints; empty disables them |
-| `--node-id` | `$NODE_ID`, `$NODE_NAME`, then the hostname | Kubernetes name of the node, reported by `NodeGetInfo`; the mount pods run there (node mode) |
-| `--mount-config` | `/etc/retycfs-csi/mount.json` | JSON configuration of the mount pods (node mode) |
-| `--namespace` | `$POD_NAMESPACE` | namespace of the mount pods and of the identities' Secrets, the driver's (node and enroller modes) |
-| `--identity-dir` | `/var/run/retycfs-csi/identity` | where the cluster-wide identity's Secret is mounted (optional volume), read at each use |
-| `--default-organization-id` | | organization of the `RetycIdentity` without `spec.organizationID` (enroller mode) |
-| `--cluster-name` | `kubernetes` | prefix of the machines' display name (enroller mode) |
+| Flag                        | Default                                     | Description                                                                                        |
+|-----------------------------|---------------------------------------------|----------------------------------------------------------------------------------------------------|
+| `--mode`                    |                                             | `controller`, `node` or `enroller` (required)                                                      |
+| `--endpoint`                | `unix:///csi/csi.sock`                      | CSI gRPC endpoint; only `unix://` is supported                                                     |
+| `--retyc-bin`               | `retyc`                                     | path to the `retyc` CLI binary (controller)                                                        |
+| `--http-endpoint`           | `:9808`                                     | address of the `/healthz`, `/readyz` and `/metrics` endpoints; empty disables them                 |
+| `--node-id`                 | `$NODE_ID`, `$NODE_NAME`, then the hostname | Kubernetes name of the node, reported by `NodeGetInfo`; the mount pods run there (node mode)       |
+| `--mount-config`            | `/etc/retycfs-csi/mount.json`               | JSON configuration of the mount pods (node mode)                                                   |
+| `--namespace`               | `$POD_NAMESPACE`                            | namespace of the mount pods and of the identities' Secrets, the driver's (node and enroller modes) |
+| `--identity-dir`            | `/var/run/retycfs-csi/identity`             | where the cluster-wide identity's Secret is mounted (optional volume), read at each use            |
+| `--default-organization-id` |                                             | organization of the `RetycIdentity` without `spec.organizationID` (enroller mode)                  |
+| `--cluster-name`            | `kubernetes`                                | prefix of the machines' display name (enroller mode)                                               |
 
-`klog` flags (`-v`, `--logtostderr`, ...) are accepted as well. The three modes need an in-cluster Kubernetes client: the
+`klog` flags (`-v`, `--logtostderr`, ...) are accepted as well. The three modes need an in-cluster Kubernetes client:
+the
 controller reads the claims, the node plugin the claims and the mount pods, the enroller the `RetycIdentity` objects.
 
 ### `mount.json`
 
 Written by the chart from the `mount.*` and `cache.*` values. Unknown keys fail the start.
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `image` | (required) | retyc-cli image of the mount pods |
-| `cliVersion` | the image tag | version recorded on the pods, compared for `retycfs_csi_mount_pod_outdated` |
-| `imagePullPolicy`, `imagePullSecrets`, `extraEnv`, `hostAliases`, `hostPID`, `priorityClassName` | | copied into every mount pod |
-| `resources` | 50m / 96Mi requested, 384Mi limit | default resources of the mount container |
-| `kubeletDir` | `/var/lib/kubelet` | staging paths must be under `<kubeletDir>/plugins` |
-| `spoolDir` | `/var/lib/retycfs-csi/spool` | |
-| `drainTimeout` | `5m` | Go duration |
-| `metricsPort` | `9567` | port of the CLI's `/healthz`, `/readyz` and `/metrics` |
-| `redis.url`, `redis.highConfidentiality` | | Redis cache; the node plugin's `RETYC_CACHE_REDIS_URL` overrides the URL |
+| Key                                                                                              | Default                           | Description                                                                 |
+|--------------------------------------------------------------------------------------------------|-----------------------------------|-----------------------------------------------------------------------------|
+| `image`                                                                                          | (required)                        | retyc-cli image of the mount pods                                           |
+| `cliVersion`                                                                                     | the image tag                     | version recorded on the pods, compared for `retycfs_csi_mount_pod_outdated` |
+| `imagePullPolicy`, `imagePullSecrets`, `extraEnv`, `hostAliases`, `hostPID`, `priorityClassName` |                                   | copied into every mount pod                                                 |
+| `resources`                                                                                      | 50m / 96Mi requested, 384Mi limit | default resources of the mount container                                    |
+| `kubeletDir`                                                                                     | `/var/lib/kubelet`                | staging paths must be under `<kubeletDir>/plugins`                          |
+| `spoolDir`                                                                                       | `/var/lib/retycfs-csi/spool`      |                                                                             |
+| `drainTimeout`                                                                                   | `5m`                              | Go duration                                                                 |
+| `metricsPort`                                                                                    | `9567`                            | port of the CLI's `/healthz`, `/readyz` and `/metrics`                      |
+| `redis.url`, `redis.highConfidentiality`                                                         |                                   | Redis cache; the node plugin's `RETYC_CACHE_REDIS_URL` overrides the URL    |
 
 ### Environment
 
-| Variable | Component | Value |
-|----------|-----------|-------|
-| `NODE_ID`, `POD_NAMESPACE` | node | downward API |
-| `POD_NAMESPACE`, `HOME=/tmp` | enroller | downward API; the CLI's home, in memory |
-| `RETYC_CACHE_REDIS_URL` | node | from the Redis Secret, copied into the mount pods' Secrets |
+| Variable                     | Component | Value                                                      |
+|------------------------------|-----------|------------------------------------------------------------|
+| `NODE_ID`, `POD_NAMESPACE`   | node      | downward API                                               |
+| `POD_NAMESPACE`, `HOME=/tmp` | enroller  | downward API; the CLI's home, in memory                    |
+| `RETYC_CACHE_REDIS_URL`      | node      | from the Redis Secret, copied into the mount pods' Secrets |
 
 The controller passes its environment to every `retyc` subprocess, with
 `RETYC_MACHINE_DIR` set to a `0700` temporary directory (in memory) holding the identity of the request. Every mount pod
@@ -554,10 +569,10 @@ All three are ready as soon as they serve. The state of the identities shows on 
 Argo CD until a person approves. The node plugin's readiness depends on no mount pod either: a volume that cannot mount
 shows on its claim and its pods.
 
-| Probe | Path | Period | Meaning |
-|-------|------|--------|---------|
-| liveness | `/healthz` | 30 s, 5 failures | the process serves HTTP at all |
-| readiness | `/readyz` | 10 s, 2 failures | the process serves (the identities show on their `RetycIdentity`) |
+| Probe     | Path       | Period           | Meaning                                                           |
+|-----------|------------|------------------|-------------------------------------------------------------------|
+| liveness  | `/healthz` | 30 s, 5 failures | the process serves HTTP at all                                    |
+| readiness | `/readyz`  | 10 s, 2 failures | the process serves (the identities show on their `RetycIdentity`) |
 
 The node plugin runs no `retyc` process: 32 MiB requested, 128 MiB limit. The controller: 64 MiB requested, 512 MiB
 limit. The enroller: 32 MiB requested, 256 MiB limit (one `retyc machine enroll` process per pending enrollment). The
@@ -565,22 +580,23 @@ mount pods' resources are under `mount.resources`.
 
 ## Metrics
 
-Every driver container (controller, node plugin, enroller) serves Prometheus metrics on `/metrics`, port `9808` (container port `health`). Every mount pod
+Every driver container (controller, node plugin, enroller) serves Prometheus metrics on `/metrics`, port `9808` (
+container port `health`). Every mount pod
 serves the CLI's on port `9567` (container port `metrics`). With the Prometheus Operator,
 `metrics.podMonitor.enabled=true` creates two `PodMonitor`s, one for the driver components and one for the mount pods
 (selected by `app.kubernetes.io/name=retycfs-mount`); add the labels your Prometheus selects on in
 `metrics.podMonitor.labels`.
 
-| Metric | Where | Meaning |
-|--------|-------|---------|
-| `go_*`, `process_*` | driver | runtime of the driver process |
-| `retycfs_csi_build_info{version, mode}` | driver | constant 1 |
-| `retycfs_csi_mount_pods{state}` | node plugin | mount pods of the node by state: `pending`, `running` (not ready), `ready`, `terminating`, `exited` |
-| `retycfs_csi_mount_pod_outdated{reason="cli_version"}` | node plugin | mount pods running another retyc-cli version than the configured one; they take it at their next mount |
-| `retycfs_ops_total{op, result}`, `retycfs_op_duration_seconds{op}`, `retycfs_bytes_total{direction}`, `retycfs_open_handles{kind}` | mount pod | filesystem operations |
-| `retycfs_cache_lookups_total`, `retycfs_dataroom_list_refreshes_total`, `retycfs_spool_bytes`, `retycfs_uploads_total{result}`, `retycfs_locks_held`, and with Redis `retycfs_store_op_duration_seconds{op, result}` | mount pod | cache, spool and uploads |
-| `retycfs_background_deletes_total{result}` | mount pod | with `csi.retycfs.com/background-delete` |
-| `retycfs_api_*`, `retycfs_token_*`, `retycfs_build_info`, `go_*`, `process_*` | mount pod | Retyc API calls and latency, token expiry, runtime |
+| Metric                                                                                                                                                                                                               | Where       | Meaning                                                                                                |
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------|--------------------------------------------------------------------------------------------------------|
+| `go_*`, `process_*`                                                                                                                                                                                                  | driver      | runtime of the driver process                                                                          |
+| `retycfs_csi_build_info{version, mode}`                                                                                                                                                                              | driver      | constant 1                                                                                             |
+| `retycfs_csi_mount_pods{state}`                                                                                                                                                                                      | node plugin | mount pods of the node by state: `pending`, `running` (not ready), `ready`, `terminating`, `exited`    |
+| `retycfs_csi_mount_pod_outdated{reason="cli_version"}`                                                                                                                                                               | node plugin | mount pods running another retyc-cli version than the configured one; they take it at their next mount |
+| `retycfs_ops_total{op, result}`, `retycfs_op_duration_seconds{op}`, `retycfs_bytes_total{direction}`, `retycfs_open_handles{kind}`                                                                                   | mount pod   | filesystem operations                                                                                  |
+| `retycfs_cache_lookups_total`, `retycfs_dataroom_list_refreshes_total`, `retycfs_spool_bytes`, `retycfs_uploads_total{result}`, `retycfs_locks_held`, and with Redis `retycfs_store_op_duration_seconds{op, result}` | mount pod   | cache, spool and uploads                                                                               |
+| `retycfs_background_deletes_total{result}`                                                                                                                                                                           | mount pod   | with `csi.retycfs.com/background-delete`                                                               |
+| `retycfs_api_*`, `retycfs_token_*`, `retycfs_build_info`, `go_*`, `process_*`                                                                                                                                        | mount pod   | Retyc API calls and latency, token expiry, runtime                                                     |
 
 The node plugin's metrics are updated by every reconciliation round (every 30 s). The mount pods' series carry the
 pod's labels through the PodMonitor (`csi.retycfs.com/volume`, `/node`, `/pvc`, `/namespace` are on the pod; add a
