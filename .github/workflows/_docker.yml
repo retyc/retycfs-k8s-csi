@@ -13,6 +13,11 @@ jobs:
   docker:
     name: ${{ inputs.push && 'Push image' || 'Build image' }}
     runs-on: ubuntu-latest
+    # Capped by the caller's: id-token for the keyless cosign signatures (Sigstore OIDC).
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     steps:
       # Full history and tags: `git describe` below needs them.
       - uses: actions/checkout@v7
@@ -81,6 +86,7 @@ jobs:
           echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -95,3 +101,75 @@ jobs:
             CREATED=${{ steps.meta.outputs.created }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Set up cosign
+        if: inputs.push
+        uses: sigstore/cosign-installer@v4.1.2
+
+      # The repositories just pushed (the tags without their tag): GHCR and Docker Hub, or GHCR only
+      # on a manual run. Every one holds the same digest, but a signature or an attestation lives
+      # beside its image: each registry gets its own. cosign reads the credentials of the logins above.
+      - name: Pushed repositories
+        if: inputs.push
+        id: repos
+        env:
+          TAGS: ${{ steps.tags.outputs.tags }}
+        run: |
+          repos=$(echo "$TAGS" | sed '/^$/d; s/:[^:/]*$//' | sort -u | tr '\n' ' ')
+          if [ -z "$repos" ]; then
+            echo "::error::pushed without tags, nothing to sign"
+            exit 1
+          fi
+          echo "repos=$repos" >> "$GITHUB_OUTPUT"
+
+      # Keyless signature (Sigstore, GitHub OIDC identity of this workflow), by digest so a tag
+      # cannot be swapped in between. --recursive also signs each platform's manifest, for a pull
+      # by platform digest. Check with:
+      #   cosign verify ghcr.io/retyc/retycfs-k8s-csi:<tag> \
+      #     --certificate-identity https://github.com/retyc/retycfs-k8s-csi/.github/workflows/_docker.yml@refs/tags/<tag> \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - name: Sign
+        if: inputs.push
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          REPOS: ${{ steps.repos.outputs.repos }}
+        run: |
+          for repo in $REPOS; do
+            cosign sign --yes --recursive "$repo@$DIGEST"
+          done
+
+      # The SBOM and SLSA provenance buildx attached to the image are not signed: the same documents
+      # are attached again as signed in-toto attestations, on each platform's manifest (they
+      # describe one platform each). Check with cosign verify-attestation --type spdxjson or
+      # slsaprovenance1, same identity as above, on the platform digest.
+      - name: Attest SBOM and provenance
+        if: inputs.push
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          REPOS: ${{ steps.repos.outputs.repos }}
+        run: |
+          set -euo pipefail
+          first=${REPOS%% *}
+          dir=$(mktemp -d)
+          # "<os>/<arch>[/<variant>] <digest>" per platform; buildx's attestation manifests have
+          # the platform unknown/unknown.
+          docker buildx imagetools inspect "$first@$DIGEST" --format '{{json .Manifest}}' |
+            jq -r '.manifests[] | select(.platform.os != "unknown")
+              | "\(.platform.os)/\(.platform.architecture)\(if .platform.variant then "/" + .platform.variant else "" end) \(.digest)"' |
+          while read -r platform digest; do
+            name=${platform//\//-}
+            docker buildx imagetools inspect "$first@$DIGEST" \
+              --format "{{json (index .SBOM \"$platform\").SPDX}}" > "$dir/$name.sbom.json"
+            docker buildx imagetools inspect "$first@$DIGEST" \
+              --format "{{json (index .Provenance \"$platform\").SLSA}}" > "$dir/$name.provenance.json"
+            for f in "$dir/$name.sbom.json" "$dir/$name.provenance.json"; do
+              if [ "$(jq -r 'type' "$f")" != object ]; then
+                echo "::error::no buildx attestation for $platform in $f"
+                exit 1
+              fi
+            done
+            for repo in $REPOS; do
+              cosign attest --yes --type spdxjson --predicate "$dir/$name.sbom.json" "$repo@$digest"
+              cosign attest --yes --type slsaprovenance1 --predicate "$dir/$name.provenance.json" "$repo@$digest"
+            done
+          done
