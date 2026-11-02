@@ -7,27 +7,7 @@ mount runs in its own pod, the **mount pod**, so that the node plugin holds no m
 
 ## Overview
 
-```
-   PersistentVolumeClaim (csi.retycfs.com/uid)                       Pod (runAsUser = uid)
-          │                                                           │ /data
-          ▼                                                           ▼
-  ┌─ controller (Deployment) ──────────────┐   ┌─ node plugin (DaemonSet, privileged) ──────────┐
-  │ csi-provisioner --extra-create-metadata│   │ csi-node-driver-registrar                      │
-  │ csi-resizer (expand + modify)          │   │ retycfs-k8s-csi --mode=node   (no retyc process) │
-  │ retycfs-k8s-csi --mode=controller        │   │   NodeStage   → Secret + mount pod, /readyz    │
-  │   └─ retyc dataroom create / set / rm  │   │   NodePublish → bind staging path → target     │
-  └──────────────────┬─────────────────────┘   │   NodeUnstage → delete the mount pod (drain)   │
-                     │                         │   watch + every 30 s: repair, restack binds    │
-                     │                         └──────────────┬─────────────────────────────────┘
-                     │                                        │ creates, deletes, probes :9567
-                     │                         ┌─ mount pod (1 per volume and node) ───────────┐
-                     │                         │ retyc fs mount retyc://<id> <staging path>     │
-                     │                         │   --allow-other --uid --gid --spool-dir ...   │
-                     │                         │ root, privileged, /dev/fuse, Bidirectional    │
-                     │                         └──────────────┬─────────────────────────────────┘
-                     ▼                                        ▼  encrypted chunks
-                                        Retyc API
-```
+!["RetycFS Kubernetes overview"](../.media/retycfs_k8s_overview.png "RetycFS Kubernetes overview").
 
 - **Controller** (`--mode=controller`, one replica by default): creates a dataroom per `CreateVolume`, reserving the
   claim's size, deletes it on `DeleteVolume`, enlarges it on `ControllerExpandVolume` and applies a
@@ -47,16 +27,16 @@ team ships, embedded in the controller image (`COPY --from` the retyc-cli image)
 
 ## Components
 
-| Component | Where | Role |
-|-----------|-------|------|
-| `retycfs-k8s-csi --mode=controller` | `Deployment` in the driver's namespace, 1 replica by default | `CreateVolume`, `DeleteVolume`, `ControllerExpandVolume`, `ControllerModifyVolume`, `ValidateVolumeCapabilities` |
-| `retycfs-k8s-csi --mode=enroller` | `Deployment` in the driver's namespace, 1 replica (`Recreate`) | enrolls the machine accounts of the `RetycIdentity` objects, writes their Secrets, reports their status |
-| `csi-provisioner` | sidecar of the controller | watches PVCs, passes the claim's name and namespace (`--extra-create-metadata`) |
-| `csi-resizer` | sidecar of the controller | claim expansion and VolumeAttributesClass changes |
-| `retycfs-k8s-csi --mode=node` | `DaemonSet`, privileged | `NodeStageVolume`, `NodePublishVolume`, their inverses, `NodeGetVolumeStats`; manages the mount pods |
-| `csi-node-driver-registrar` | sidecar of the node plugin | registers the driver socket with kubelet |
-| mount pod `retycfs-mount-<hash>` | `Pod` in the driver's namespace, pinned to its node | `retyc fs mount` of one dataroom on kubelet's staging path |
-| `retyc` | controller image, and image of the mount pods | every interaction with the Retyc API and all cryptography |
+| Component                           | Where                                                          | Role                                                                                                             |
+|-------------------------------------|----------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| `retycfs-k8s-csi --mode=controller` | `Deployment` in the driver's namespace, 1 replica by default   | `CreateVolume`, `DeleteVolume`, `ControllerExpandVolume`, `ControllerModifyVolume`, `ValidateVolumeCapabilities` |
+| `retycfs-k8s-csi --mode=enroller`   | `Deployment` in the driver's namespace, 1 replica (`Recreate`) | enrolls the machine accounts of the `RetycIdentity` objects, writes their Secrets, reports their status          |
+| `csi-provisioner`                   | sidecar of the controller                                      | watches PVCs, passes the claim's name and namespace (`--extra-create-metadata`)                                  |
+| `csi-resizer`                       | sidecar of the controller                                      | claim expansion and VolumeAttributesClass changes                                                                |
+| `retycfs-k8s-csi --mode=node`       | `DaemonSet`, privileged                                        | `NodeStageVolume`, `NodePublishVolume`, their inverses, `NodeGetVolumeStats`; manages the mount pods             |
+| `csi-node-driver-registrar`         | sidecar of the node plugin                                     | registers the driver socket with kubelet                                                                         |
+| mount pod `retycfs-mount-<hash>`    | `Pod` in the driver's namespace, pinned to its node            | `retyc fs mount` of one dataroom on kubelet's staging path                                                       |
+| `retyc`                             | controller image, and image of the mount pods                  | every interaction with the Retyc API and all cryptography                                                        |
 
 The three modes are the same binary and the same image. The controller runs `retyc --json dataroom
 create|set|rm|ls` and `user quota` as short-lived subprocesses; the node plugin only talks to the Kubernetes API and
@@ -84,7 +64,8 @@ by the enroller, which creates the one of the driver's namespace itself when `id
 [configuration.md](configuration.md#identities) for the phases and the approval.
 
 An identity request that finds a Secret without `machine.json` (approval pending) is `Unavailable`, which the sidecars
-and kubelet retry, rather than failed. A missing or incomplete identity is `FailedPrecondition`. The readiness of the controller and the
+and kubelet retry, rather than failed. A missing or incomplete identity is `FailedPrecondition`. The readiness of the
+controller and the
 node plugin does not depend on the approval (`helm install --wait` would otherwise wait for a person): it shows on the
 `RetycIdentity` and on the claims' Events.
 
@@ -95,14 +76,16 @@ which stands for the cluster.
 
 kubelet takes the node-stage secret from the PV, not from the class: a static PV of a tenant class written without
 `nodeStageSecretRef` is staged with no secrets. Before using the default identity for a stage, the node plugin
-therefore reads every PV of the volume handle and their StorageClasses, and refuses with `FailedPrecondition` when the class declares
+therefore reads every PV of the volume handle and their StorageClasses, and refuses with `FailedPrecondition` when the
+class declares
 `csi.storage.k8s.io/node-stage-secret-name` (or the PV names a node-stage secret kubelet did not send): a tenant's
 volume is never mounted with the cluster-wide machine (see [configuration.md](configuration.md#static-pvs)).
 
 The controller runs each `retyc` subprocess with the request's identity, written in a `0700` in-memory directory
 (`RETYC_MACHINE_DIR`). On the node, every mount pod gets its own Secret, `retycfs-mount-<hash>-<suffix>`, holding the
 identity's files (the default one, or a copy of the tenant's received at stage) and, with Redis,
-`RETYC_CACHE_REDIS_URL`. The files are projected in the pod (`RETYC_MACHINE_DIR`, mode owner-read). The Secret is created
+`RETYC_CACHE_REDIS_URL`. The files are projected in the pod (`RETYC_MACHINE_DIR`, mode owner-read). The Secret is
+created
 before the pod and owned by it, so the garbage collector deletes it with the pod. Each mount pod has its own
 `RETYC_CONFIG_DIR` in an `emptyDir`: caches never mix between volumes. Machine accounts use no keyring.
 
@@ -164,20 +147,20 @@ deletes its older versions.
 
 ### Errors of the controller
 
-| Condition | CSI code |
-|-----------|----------|
-| no `csi.retycfs.com/uid`, or an invalid one; unknown StorageClass parameter; unknown or invalid VolumeAttributesClass parameter; block volume; API validation error | `InvalidArgument` |
-| claim not found | `NotFound` |
-| claim cannot be read (Kubernetes API) | `Unavailable` |
-| `limit_bytes` below 20 GiB or below the request; reservation the API refuses to shrink (`capacity_shrink`) or below its minimum (`capacity_too_small`) | `OutOfRange` |
-| account read-only, dataroom count reached, no storage left on the plan (`plan_exceeded`, `storage_exceeded`) | `ResourceExhausted` |
-| dataroom of the same name with an incompatible reservation | `AlreadyExists` |
+| Condition                                                                                                                                                                                                             | CSI code             |
+|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------|
+| no `csi.retycfs.com/uid`, or an invalid one; unknown StorageClass parameter; unknown or invalid VolumeAttributesClass parameter; block volume; API validation error                                                   | `InvalidArgument`    |
+| claim not found                                                                                                                                                                                                       | `NotFound`           |
+| claim cannot be read (Kubernetes API)                                                                                                                                                                                 | `Unavailable`        |
+| `limit_bytes` below 20 GiB or below the request; reservation the API refuses to shrink (`capacity_shrink`) or below its minimum (`capacity_too_small`)                                                                | `OutOfRange`         |
+| account read-only, dataroom count reached, no storage left on the plan (`plan_exceeded`, `storage_exceeded`)                                                                                                          | `ResourceExhausted`  |
+| dataroom of the same name with an incompatible reservation                                                                                                                                                            | `AlreadyExists`      |
 | no secrets and no default identity; identity incomplete; machine refused by Retyc (`auth_required`, `unauthenticated`: disabled or deleted); configuration refused (`config`); CLI refused as too old (`cli_too_old`) | `FailedPrecondition` |
-| identity enrolled but awaiting approval | `Unavailable` |
-| API answered 403 (`forbidden`) | `PermissionDenied` |
-| API rate limit (`rate_limited`) | `Unavailable` |
-| dataroom missing on expand or modify | `NotFound` |
-| anything else from the CLI (`api_error`, `error`, an unknown kind) | `Internal` |
+| identity enrolled but awaiting approval                                                                                                                                                                               | `Unavailable`        |
+| API answered 403 (`forbidden`)                                                                                                                                                                                        | `PermissionDenied`   |
+| API rate limit (`rate_limited`)                                                                                                                                                                                       | `Unavailable`        |
+| dataroom missing on expand or modify                                                                                                                                                                                  | `NotFound`           |
+| anything else from the CLI (`api_error`, `error`, an unknown kind)                                                                                                                                                    | `Internal`           |
 
 The provisioner and the resizer retry with their own backoff, and record the message as an event on the claim.
 
@@ -185,7 +168,8 @@ The CLI's failures are told apart by the `kind` of the JSON error it prints on s
 v1.5.0-beta1 on: `{"error", "kind", "status", "code", "detail"}`, kinds in brackets above); `detail`, the API's wording,
 is only carried in the message. A machine refused is `FailedPrecondition` rather than `Unauthenticated`: in gRPC the
 latter says that the RPC's caller (the sidecar) is not authenticated, while here it is the identity of the secrets that
-the Retyc API refuses, and its reactivation (or a new machine) is what it waits for. An older CLI prints only `{"error": "..."}`: the driver
+the Retyc API refuses, and its reactivation (or a new machine) is what it waits for. An older CLI prints only
+`{"error": "..."}`: the driver
 then falls back to the text the CLI relays from the API (`API error 404:`, `API error 422:`, `Not enough storage left`,
 `can only be enlarged`, `must be at least N bytes`), and the login, configuration, 403, rate limit and version refusals
 stay `Internal`.
@@ -217,7 +201,8 @@ that a restarted node plugin finds its pods again; labels `app.kubernetes.io/nam
   cache: about 4 KiB of the mount pod's memory per file or folder examined (`ls -l`, `stat`, `open`, a backup),
   2 KiB per entry only listed (`ls`, `find`). The kernel drops these entries when the node runs short of memory,
   never when only the mount pod reaches its limit: the mount pod is then killed (`137`, OOMKilled) and recreated.
-  Raise `csi.retycfs.com/mount-memory-limit` for a dataroom walked in full (an indexer, a backup). Overridable per claim (`csi.retycfs.com/mount-*` annotations).
+  Raise `csi.retycfs.com/mount-memory-limit` for a dataroom walked in full (an indexer, a backup). Overridable per
+  claim (`csi.retycfs.com/mount-*` annotations).
 - **Spool**: `hostPath` `<mount.spoolDir>/<volume-id>` (`/var/lib/retycfs-csi/spool/<id>`), mode 0700, emptied by the
   node plugin before every creation: a killed process leaves its files there.
 - **Restart policy** `Never`: the node plugin recreates the pod, with its own backoff (below).
@@ -249,19 +234,20 @@ for kubelet: it removes `vol_data.json` and will never unstage the volume, so th
 the exited pod, its finalizer and its Secret, like any orphan. The give-up itself is remembered for 30 minutes after
 the last stage that found it, so that kubelet's retries keep failing at once (with the last output of the pod) instead
 of logging in again with a refused machine. A give-up on a `77` expires after 15 minutes, for one more try, so that a
-machine enabled again in Retyc gets its mounts back by itself; a give-up on a `78` does not. Any other code may be transient (API or identity provider unreachable) and is retried
+machine enabled again in Retyc gets its mounts back by itself; a give-up on a `78` does not. Any other code may be
+transient (API or identity provider unreachable) and is retried
 forever. The backoff lives in the node plugin's memory: a restart of the plugin forgets it.
 
 ### Exit codes
 
-| Code | Meaning | What follows |
-|------|---------|--------------|
-| `0` | unmounted, nothing lost (an unstage, or an `umount` of the staging path) | nothing |
-| `1` | any other error, a failure at start included (a Redis that does not answer, a mount point left dead) | when the node plugin releases the pod: a `MountFailed` event on the claim, unless the output reports lost files (below); recreated with the backoff while the volume is staged |
-| `75` | writes lost: files being written, or background deletes, could not be sent before the filesystem went away (drain timed out or cut short, API refusal) | when the node plugin releases the pod: a `WritesLost` event on the claim; recreated with the backoff while the volume is staged, never a give-up (the mount itself worked) |
-| `77` | the machine account is disabled or deleted in Retyc; it wins over `75` when both happen | give-up at the first one (one more try 15 minutes later); a `WritesLost` event too if the output reports lost files |
-| `78` | the machine account's configuration is refused | give-up at the first one, until the identity changes |
-| `137` | killed (`SIGKILL`: `kill -9`, OOM kill, grace period exceeded) | recreated with the backoff, binds restacked; a `MountOOMKilled` event on the claim for an OOM kill, or any `137` while no deletion asked the pod to stop (containerd does not always say `OOMKilled`) |
+| Code  | Meaning                                                                                                                                                | What follows                                                                                                                                                                                          |
+|-------|--------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `0`   | unmounted, nothing lost (an unstage, or an `umount` of the staging path)                                                                               | nothing                                                                                                                                                                                               |
+| `1`   | any other error, a failure at start included (a Redis that does not answer, a mount point left dead)                                                   | when the node plugin releases the pod: a `MountFailed` event on the claim, unless the output reports lost files (below); recreated with the backoff while the volume is staged                        |
+| `75`  | writes lost: files being written, or background deletes, could not be sent before the filesystem went away (drain timed out or cut short, API refusal) | when the node plugin releases the pod: a `WritesLost` event on the claim; recreated with the backoff while the volume is staged, never a give-up (the mount itself worked)                            |
+| `77`  | the machine account is disabled or deleted in Retyc; it wins over `75` when both happen                                                                | give-up at the first one (one more try 15 minutes later); a `WritesLost` event too if the output reports lost files                                                                                   |
+| `78`  | the machine account's configuration is refused                                                                                                         | give-up at the first one, until the identity changes                                                                                                                                                  |
+| `137` | killed (`SIGKILL`: `kill -9`, OOM kill, grace period exceeded)                                                                                         | recreated with the backoff, binds restacked; a `MountOOMKilled` event on the claim for an OOM kill, or any `137` while no deletion asked the pod to stop (containerd does not always say `OOMKilled`) |
 
 A pod that left no exit code (evicted, lost with its node) counts as `-1`.
 
@@ -299,7 +285,8 @@ For each mount pod whose volume is staged:
 A mount pod whose volume is neither staged nor bound anywhere is an orphan (an unstage that never completed, a stage
 that failed for good) and is deleted. When the node plugin cannot read kubelet's directory of the driver,
 `<kubeletDir>/plugins/kubernetes.io/csi/csi.retycfs.com` (a `node.kubeletDir` that is not kubelet's `--root-dir`, or the
-plugins directory not mounted), every volume would look unstaged: it then deletes no orphan and logs the error. A volume still mounted on the node without any mount pod (deleted by hand, with
+plugins directory not mounted), every volume would look unstaged: it then deletes no orphan and logs the error. A volume
+still mounted on the node without any mount pod (deleted by hand, with
 its finalizer removed) is logged: nothing is left to recreate it from, reschedule its pods.
 
 After a `kill -9` of a mount process, the volume is back in about ten seconds: the first restart waits 5 s, then the
@@ -319,7 +306,7 @@ give the pod a liveness probe that writes to the volume, so that it restarts ont
 ```yaml
 livenessProbe:
   exec:
-    command: ["sh", "-c", "touch /data/.liveness"]
+    command: [ "sh", "-c", "touch /data/.liveness" ]
   periodSeconds: 30
   timeoutSeconds: 10
   failureThreshold: 2
@@ -353,7 +340,7 @@ the mount pod. The kernel enforces the permissions (`default_permissions`).
   mode is the one stored with the file (`chmod` works and is kept), 0644 / 0755 for a file without one; `chown` is
   accepted and ignored.
 - **A pod must run with that UID to write** (`securityContext.runAsUser`). A pod running as another UID reads (0644 /
-  0755) but gets `Permission denied` on every write. The driver does nothing to check it beforehand.
+    0755) but gets `Permission denied` on every write. The driver does nothing to check it beforehand.
 - The owner is set per volume and per node, not per pod: all the pods of a claim get the same owner.
 - `fsGroup` changes nothing: the driver declares `fsGroupPolicy: None` (a recursive `chown` would walk the whole
   dataroom through the API, and is ignored anyway).
@@ -370,7 +357,8 @@ the mount pod. The kernel enforces the permissions (`default_permissions`).
 - Every `close` of a file opened for writing stores a version, an unchanged file excepted; with versioning off, only
   the latest is kept.
 - Opening a file reads the version current at that moment (close-to-open). Listings and names are cached for the cache
-  TTL (the CLI's default, 1 min, or `csi.retycfs.com/cache-ttl`): a change made on another node or outside the cluster is
+  TTL (the CLI's default, 1 min, or `csi.retycfs.com/cache-ttl`): a change made on another node or outside the cluster
+  is
   seen after that at most.
 - `rename` over an existing file is atomic on the server; `cp` of a whole file is a server-side copy; symbolic links,
   `chmod` and `utimens` work and are stored. Reads are positioned: reading the middle of a large file downloads the
@@ -414,10 +402,12 @@ PV's claim on another class. The driver still refuses an invalid claim at `Creat
   The node plugin is trusted with all of them: its Role reads every Secret of the namespace (it copies an identity
   into each mount pod's Secret), so a compromised node plugin has every machine's keys, as it already has the data
   of every volume mounted on its node.
-- **Identity Secrets policy**: a `ValidatingAdmissionPolicy` (`<release>-identity-secrets`, always fail-closed) lets only
+- **Identity Secrets policy**: a `ValidatingAdmissionPolicy` (`<release>-identity-secrets`, always fail-closed) lets
+  only
   the enroller's service account create, update or delete the Secrets of type `csi.retycfs.com/machine-identity` of the
   driver's namespace (`system:masters` and the namespace controller aside), and the enroller write no other Secret than
-  `retycfs-identity` and `retycfs-identity-*`. RBAC cannot say it: a Role grants verbs on all the Secrets of a namespace,
+  `retycfs-identity` and `retycfs-identity-*`. RBAC cannot say it: a Role grants verbs on all the Secrets of a
+  namespace,
   and the node plugin writes the mount pods' Secrets there.
 - **Enroller**: non-root, read-only root filesystem, keys only on an in-memory `/tmp`, a service account of its own
   (it reads namespaces and PVs, writes `RetycIdentity` status and Secrets, and needs no access to the claims).
@@ -472,7 +462,8 @@ PV's claim on another class. The driver still refuses an invalid claim at `Creat
   can wait up to 2 min for the API. An upload that is slow but progressing has no time limit, by design: an 8 MiB chunk
   must get through a slow link. The application cannot be interrupted meanwhile, not even by `kill -9`: retyc-cli
   honours an interrupt only when the caller is dying, read from `/proc`, and the application's PID, in another pod,
-  is not visible from the mount pod. The pod stays `Terminating` until the upload ends: the mount pod is not stopping, so
+  is not visible from the mount pod. The pod stays `Terminating` until the upload ends: the mount pod is not stopping,
+  so
   its drain timeout does not apply. With an upload that stalls without the connection dropping, it stays blocked
   indefinitely.
   `hostPID: true` on the mount pods would make the interrupts work, but it is rejected: the Pod Security Standards
