@@ -510,7 +510,8 @@ func TestAuthStatusCondition(t *testing.T) {
 	v.run(t, tenantNS)
 	st := v.status(t, tenantNS).Status
 	c := meta.FindStatusCondition(st.Conditions, ConditionActive)
-	if st.Phase != PhaseApproved || c == nil || c.Status != metav1.ConditionFalse || c.Reason != ReasonMachineRefused {
+	if st.Phase != PhaseRefused || c == nil || c.Status != metav1.ConditionFalse || c.Reason != ReasonMachineRefused ||
+		!meta.IsStatusConditionTrue(st.Conditions, ConditionEnrolled) {
 		t.Fatalf("status = %+v", st)
 	}
 	v.hasEvent(t, ReasonMachineRefused)
@@ -529,11 +530,15 @@ func TestAuthStatusCondition(t *testing.T) {
 		ReasonMachineRefused {
 		t.Errorf("condition = %+v", c)
 	}
+	if p := v.status(t, tenantNS).Status.Phase; p != PhaseRefused {
+		t.Errorf("phase = %s while Retyc is unreachable, want %s", p, PhaseRefused)
+	}
 	v.now = v.now.Add(DefaultAuthInterval)
 	v.auth = nil
 	v.run(t, tenantNS)
-	if !meta.IsStatusConditionTrue(v.status(t, tenantNS).Status.Conditions, ConditionActive) {
-		t.Error("Active not true once accepted again")
+	if st := v.status(t, tenantNS).Status; !meta.IsStatusConditionTrue(st.Conditions, ConditionActive) ||
+		st.Phase != PhaseApproved {
+		t.Errorf("once accepted again: phase = %s, conditions = %+v", st.Phase, st.Conditions)
 	}
 	if len(v.retyc.calls) != 0 {
 		t.Error("an approved identity was enrolled")

@@ -124,6 +124,7 @@ kubectl -n retycfs-system logs deploy/retycfs-csi-enroller
 | Phase      | Cause                                                                                                                           | What to do                                                                                                                                                                                                                                                                   |
 |------------|---------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `Pending`  | the request waits for an administrator of the Retyc organization                                                                | compare the `FINGERPRINT` with the request in Retyc (Organization > Machines, or `retyc machine requests`), then approve it, in the web app or with `retyc machine approve <enrollment-id> --fingerprint XXXX-...`. A request lives 15 minutes; the enroller sends a new one |
+| `Refused`  | Retyc refuses the approved machine: disabled or deleted there                                                                   | see below                                                                                                                                                                                                                                                                    |
 | `Expired`  | four requests in a row went unanswered                                                                                          | approve, then ask again: `kubectl -n <namespace> annotate retycidentity default csi.retycfs.com/retry=$(date +%s) --overwrite`                                                                                                                                               |
 | `Denied`   | an administrator refused the request. Terminal                                                                                  | delete and recreate the `RetycIdentity`                                                                                                                                                                                                                                      |
 | `Rejected` | no organization (`spec.organizationID` empty and no `identity.organizationID` on the chart), or Retyc refused the configuration | set it, then the `retry` annotation. `organizationID` cannot be changed once set: delete and recreate                                                                                                                                                                        |
@@ -132,10 +133,11 @@ kubectl -n retycfs-system logs deploy/retycfs-csi-enroller
 The pods of the driver stay ready meanwhile: an identity awaiting approval shows on its `RetycIdentity` and on the
 claims' Events, not on the pods.
 
-`Approved` with `ACTIVE` `False` (reason `MachineRefused`): Retyc refuses the machine, disabled or deleted there. The
+`Refused` (`ACTIVE` `False`, reason `MachineRefused`): Retyc refuses the machine, disabled or deleted there. The
 machine itself cannot tell the two apart; an administrator can, with `retyc machine ls` (status `inactive` or
-`deleted`) or in Organization > Machines. Disabled: enable it again, mounts retry within a minute (once `ACTIVE` is
-`True` again; 15 minutes at most). Deleted: it cannot
+`deleted`) or in Organization > Machines. Disabled: enable it again, the phase is `Approved` again and mounts retry within a
+minute (once `ACTIVE` is `True` again; a failed stage at kubelet's next stage, up to about 2 minutes more; 15 minutes
+at most). Deleted: it cannot
 come
 back; delete the `RetycIdentity` (`kubectl -n <ns> delete retycidentity default`, then recreate it for a tenant; the
 enroller recreates the cluster-wide one by itself) and approve the new request. Retyc refuses to delete a machine that

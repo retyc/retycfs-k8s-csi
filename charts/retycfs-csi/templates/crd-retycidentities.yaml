@@ -101,12 +101,13 @@ spec:
               properties:
                 phase:
                   description: >-
-                    Pending (awaiting approval), Approved, Denied (recreate the RetycIdentity to enroll
+                    Pending (awaiting approval), Approved, Refused (approved, but disabled or deleted in
+                    Retyc: Approved again once enabled), Denied (recreate the RetycIdentity to enroll
                     again), Expired (unanswered too many times: annotate csi.retycfs.com/retry), Rejected
                     (no organization, or configuration refused by Retyc), Blocked (an older identity's
                     Secret, still used by PVs, is in the way).
                   type: string
-                  enum: [Pending, Approved, Denied, Expired, Rejected, Blocked]
+                  enum: [Pending, Approved, Refused, Denied, Expired, Rejected, Blocked]
                 fingerprint:
                   description: Fingerprint of the request, to compare before approving it.
                   type: string

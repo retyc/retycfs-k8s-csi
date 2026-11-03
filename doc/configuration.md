@@ -249,7 +249,7 @@ spec: # optional
 
    | Column | |
       |---|---|
-   | `PHASE` | `Pending`, `Approved`, `Denied`, `Expired`, `Rejected` or `Blocked` |
+   | `PHASE` | `Pending`, `Approved`, `Refused`, `Denied`, `Expired`, `Rejected` or `Blocked` |
    | `FINGERPRINT` | the request's fingerprint, to compare before approving |
    | `ACTIVE` | once approved, whether Retyc still accepts the machine (`False`: disabled or deleted there, checked every 5 minutes, every 30 s while `False`, at once when a mount pod exits with `77`) |
    | `REASON` (`-o wide`) | why it is not active (`MachineRefused`: disabled or deleted in Retyc) |
@@ -275,6 +275,7 @@ spec: # optional
 |------------|----------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `Pending`  | request awaiting approval (it lives 15 minutes; the enroller sends a new one when it expires)                                    | approve it                                                                                                                                                                                                                            |
 | `Approved` | the machine is enrolled; the condition `Active` tells whether Retyc still accepts it                                             |                                                                                                                                                                                                                                       |
+| `Refused`  | the machine is enrolled, but Retyc refuses it (disabled or deleted there; `Active` is `False`, reason `MachineRefused`)          | disabled: enable it again in Retyc, the phase is `Approved` again within 30 s. Deleted: delete the `RetycIdentity` to enroll a new one                                                                                                |
 | `Expired`  | four requests in a row, 15 minutes each, went unanswered                                                                         | `kubectl -n <ns> annotate retycidentity default csi.retycfs.com/retry=$(date +%s) --overwrite` starts a new series                                                                                                                    |
 | `Denied`   | an administrator refused the request. Terminal                                                                                   | delete and recreate the `RetycIdentity`                                                                                                                                                                                               |
 | `Rejected` | no organization (`spec.organizationID` and `identity.organizationID` both empty), or Retyc refused the configuration (exit `78`) | no organization: set `identity.organizationID` on the chart (the next pass enrolls) or recreate the `RetycIdentity` with `spec.organizationID` (it cannot be added later). Configuration refused: fix it, then the `retry` annotation |
@@ -285,11 +286,11 @@ approval stays `Pending`, with an Event giving the fingerprint to compare.
 
 The `Active` condition comes from `retyc auth status` run as the machine every 5 minutes, every 30 s while Retyc
 refuses it, and at once when a mount pod exits with `77`. A machine **disabled or
-deleted in Retyc** sets `Active=False` (reason `MachineRefused`): its mounts fail with exit `77`. The machine cannot
+deleted in Retyc** sets `Active=False` (reason `MachineRefused`) and the phase `Refused`: its mounts fail with exit `77`. The machine cannot
 tell the two
 apart; an administrator can (Organization > Machines, or `retyc machine ls`). Disabled: once it is enabled again, the
-`RetycIdentity` is `Active` again within 30 s and the node plugins try its volumes again at once (15 minutes at most
-without that signal). Deleted: delete the `RetycIdentity` to enroll a new one. Exit `78`
+`RetycIdentity` is `Active` again within 30 s and the node plugins try its staged volumes again at once; a volume whose
+stage failed comes back at kubelet's next stage (up to about 2 minutes). 15 minutes at most without that signal. Deleted: delete the `RetycIdentity` to enroll a new one. Exit `78`
 is a configuration error
 (see [troubleshooting.md](troubleshooting.md#exit-codes-of-a-mount-pod)).
 

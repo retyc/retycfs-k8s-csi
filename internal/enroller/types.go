@@ -29,6 +29,9 @@ const ObjectName = "default"
 const (
 	PhasePending  = "Pending"
 	PhaseApproved = "Approved"
+	// PhaseRefused is an approved machine that Retyc refuses (disabled or deleted there): Approved
+	// again as soon as Retyc accepts it.
+	PhaseRefused  = "Refused"
 	PhaseDenied   = "Denied"
 	PhaseExpired  = "Expired"
 	PhaseRejected = "Rejected"

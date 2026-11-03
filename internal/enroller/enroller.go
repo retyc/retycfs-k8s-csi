@@ -398,6 +398,9 @@ func (p *pass) approved(ctx context.Context, secret *corev1.Secret) {
 	if c := meta.FindStatusCondition(st.Conditions, ConditionActive); c != nil && c.Status != metav1.ConditionTrue {
 		st.Message = c.Message
 	}
+	if machineRefused(st) {
+		st.Phase = PhaseRefused // still enrolled (Enrolled stays true): only what kubectl shows
+	}
 }
 
 // enroll runs one enrollment, from secret's keys when it holds them, and records its outcome.
