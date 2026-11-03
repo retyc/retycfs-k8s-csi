@@ -71,7 +71,7 @@ spec:
       message: "annotation csi.retycfs.com/cache-ttl: want a positive Go duration (30s, 5m, 1h30m)"
       reason: Invalid
     # strconv.ParseBool's values.
-    {{- range list "background-delete" "unsafe-write" "read-only" }}
+    {{- range list "background-delete" "unsafe-write" "read-only" "warmup" }}
     {{- $k := printf "csi.retycfs.com/%s" . }}
     - expression: >-
         !('{{ $k }}' in variables.changed)
@@ -81,6 +81,15 @@ spec:
       message: "annotation {{ $k }}: want true or false"
       reason: Invalid
     {{- end }}
+    # strconv.ParseUint(_, 10, 31): 0 (every level) or a number of levels.
+    - expression: >-
+        !('csi.retycfs.com/warmup-depth' in variables.changed)
+        || (variables.ann['csi.retycfs.com/warmup-depth'].matches('^0*[0-9]{1,10}$')
+            && int(variables.ann['csi.retycfs.com/warmup-depth']) <= 2147483647)
+      messageExpression: >-
+        'annotation csi.retycfs.com/warmup-depth = "' + variables.ann['csi.retycfs.com/warmup-depth'] + '": want a positive integer (0: every level)'
+      message: "annotation csi.retycfs.com/warmup-depth: want a positive integer (0: every level)"
+      reason: Invalid
     # Patterns separated by spaces, or "none" alone (keep no file local).
     - expression: >-
         !('csi.retycfs.com/local-file' in variables.changed)

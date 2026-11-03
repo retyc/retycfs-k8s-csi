@@ -82,7 +82,9 @@ func testSpec() *Spec {
 		StagingPath: testStaging,
 		Credentials: testCredentials("key"),
 		UID:         1000, GID: 2000,
-		Options: Options{CacheTTL: 30 * time.Second, ReadOnly: true, LocalFile: []string{"*.tmp"}},
+		Options: Options{
+			CacheTTL: 30 * time.Second, ReadOnly: true, Warmup: true, WarmupDepth: 2, LocalFile: []string{"*.tmp"},
+		},
 		Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
 			corev1.ResourceMemory: resource.MustParse("1Gi"), corev1.ResourceCPU: resource.MustParse("1"),
 		}},
@@ -252,8 +254,8 @@ func TestEnsureCreatesPodAndSecret(t *testing.T) {
 		t.Errorf("probe = %+v, ports = %+v", c.ReadinessProbe, c.Ports)
 	}
 	wantArgs := "fs mount retyc://dr-1 /staging/globalmount --allow-other --uid=1000 --gid=2000 --spool-dir=/spool " +
-		"--metrics-addr=0.0.0.0:9567 --drain-timeout=5m0s --cache-ttl=30s --read-only --local-file=*.tmp " +
-		"--cache-store=redis --cache-redis-high-confidentiality"
+		"--metrics-addr=0.0.0.0:9567 --drain-timeout=5m0s --cache-ttl=30s --read-only --warmup --warmup-depth=2 " +
+		"--local-file=*.tmp --cache-store=redis --cache-redis-high-confidentiality"
 	if got := strings.Join(c.Args, " "); got != wantArgs {
 		t.Errorf("args =\n%s\nwant\n%s", got, wantArgs)
 	}
@@ -375,6 +377,7 @@ func TestEnsureIdempotentAndConfigChange(t *testing.T) {
 		"uid":         func(s *Spec) { s.UID = 0 },
 		"credentials": func(s *Spec) { s.Credentials = testCredentials("other") },
 		"options":     func(s *Spec) { s.Options.BackgroundDelete = true },
+		"warmup":      func(s *Spec) { s.Options.WarmupDepth = 5 },
 		"resources":   func(s *Spec) { s.Resources = corev1.ResourceRequirements{} },
 	} {
 		spec := testSpec()

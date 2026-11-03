@@ -376,6 +376,9 @@ volumes with different TTLs can share it. Without `cache.highConfidentiality`, R
 folder names; with it, only the API's ciphertexts. A Redis that fails at start fails the mount (exit `1`); once mounted,
 a failing Redis falls back to a private memory cache.
 
+With `csi.retycfs.com/warmup`, a mount pod fills its cache once mounted by listing the whole tree in the background,
+without delaying the stage (see [configuration.md](configuration.md#warmup)).
+
 ## Admission policy
 
 The chart ships a `ValidatingAdmissionPolicy` (with its binding, `validationActions: [Deny]`) on the claims of its

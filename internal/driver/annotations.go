@@ -27,6 +27,8 @@ const (
 	AnnotationBackgroundDelete = "csi.retycfs.com/background-delete" // --background-delete, a boolean
 	AnnotationUnsafeWrite      = "csi.retycfs.com/unsafe-write"      // --unsafe-write, a boolean
 	AnnotationReadOnly         = "csi.retycfs.com/read-only"         // --read-only, a boolean
+	AnnotationWarmup           = "csi.retycfs.com/warmup"            // --warmup, a boolean
+	AnnotationWarmupDepth      = "csi.retycfs.com/warmup-depth"      // --warmup-depth, levels listed (0: all)
 	// AnnotationLocalFile replaces the patterns of files never sent (--local-file), separated by
 	// spaces; "none" sends every file.
 	AnnotationLocalFile = "csi.retycfs.com/local-file"
@@ -126,12 +128,20 @@ func parseMountSettings(settings map[string]string) (mountSettings, error) {
 		AnnotationBackgroundDelete: &ms.Options.BackgroundDelete,
 		AnnotationUnsafeWrite:      &ms.Options.UnsafeWrite,
 		AnnotationReadOnly:         &ms.Options.ReadOnly,
+		AnnotationWarmup:           &ms.Options.Warmup,
 	} {
 		if raw, ok := settings[key]; ok {
 			if *dst, err = strconv.ParseBool(raw); err != nil {
 				return ms, fmt.Errorf("annotation %s = %q: want true or false", key, raw)
 			}
 		}
+	}
+	if raw, ok := settings[AnnotationWarmupDepth]; ok {
+		n, err := strconv.ParseUint(raw, 10, 31)
+		if err != nil {
+			return ms, fmt.Errorf("annotation %s = %q: want a positive integer (0: every level)", AnnotationWarmupDepth, raw)
+		}
+		ms.Options.WarmupDepth = int(n)
 	}
 	if raw, ok := settings[AnnotationLocalFile]; ok {
 		ms.Options.LocalFile = strings.Fields(raw)

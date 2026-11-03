@@ -499,6 +499,7 @@ func TestNodeStageConfigAndReadiness(t *testing.T) {
 	e.claim(map[string]string{
 		AnnotationUID: "1000", AnnotationCacheTTL: "1m", AnnotationReadOnly: "true",
 		AnnotationBackgroundDelete: "true", AnnotationLocalFile: "*.tmp  .~lock*",
+		AnnotationWarmup: "true", AnnotationWarmupDepth: "3",
 		AnnotationMountMemoryLimit: "1Gi", AnnotationMountCPURequest: "200m",
 	})
 	tenant := machineSecrets("tenant-key")
@@ -510,7 +511,7 @@ func TestNodeStageConfigAndReadiness(t *testing.T) {
 	args := strings.Join(pod.Spec.Containers[0].Args, " ")
 	for _, want := range []string{
 		"--uid=1000", "--gid=1000", "--cache-ttl=1m0s", "--read-only", "--background-delete",
-		"--local-file=*.tmp --local-file=.~lock*",
+		"--local-file=*.tmp --local-file=.~lock*", "--warmup --warmup-depth=3",
 	} {
 		if !strings.Contains(args, want) {
 			t.Errorf("args %q lack %q", args, want)

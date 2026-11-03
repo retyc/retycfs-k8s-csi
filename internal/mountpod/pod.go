@@ -117,6 +117,10 @@ type Options struct {
 	BackgroundDelete bool
 	UnsafeWrite      bool
 	ReadOnly         bool
+	// Warmup lists the tree in the background once mounted; WarmupDepth bounds the levels listed,
+	// 0 for all.
+	Warmup      bool
+	WarmupDepth int
 	// LocalFile replaces the CLI's patterns of files never sent; nil keeps them, {"none"} drops them.
 	LocalFile []string
 }
@@ -234,6 +238,12 @@ func (m *Manager) mountArgs(spec *Spec) []string {
 	}
 	if o.ReadOnly {
 		args = append(args, "--read-only")
+	}
+	if o.Warmup {
+		args = append(args, "--warmup")
+	}
+	if o.WarmupDepth > 0 {
+		args = append(args, "--warmup-depth="+strconv.Itoa(o.WarmupDepth))
 	}
 	for _, p := range o.LocalFile {
 		args = append(args, "--local-file="+p)
