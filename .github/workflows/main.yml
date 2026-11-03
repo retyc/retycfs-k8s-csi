@@ -1,13 +1,17 @@
 name: CI
 
+# Pull requests test the branches (merged with master, forks included); push only covers master,
+# after the merge, and publishes its image. A branch without a pull request gets no run: open a
+# draft one, or start this workflow by hand.
 on:
   push:
-    branches: ['**']
+    branches: [master]
     paths: &code_paths
       - '**.go'
       - 'go.mod'
       - 'go.sum'
       - 'Dockerfile'
+      - '.dockerignore'
       - 'charts/**'
       - '.github/scripts/**'
       - '.github/workflows/main.yml'
@@ -17,17 +21,55 @@ on:
     paths: *code_paths
   workflow_dispatch:
 
+# A new push to a pull request cancels its previous run. Runs on master are never cancelled: each
+# one pushes the `master` image.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ci:
     name: CI
     uses: ./.github/workflows/_ci.yml
 
-  # Builds the full image (driver + embedded retyc-cli) for both platforms everywhere, so
-  # a broken Dockerfile fails the PR rather than the release; pushes it (as `master`) from the
-  # default branch only. `latest` belongs to the release workflow.
+  # Whether the change touches how the image is built. The Go code alone does not count: the CI
+  # job already compiles it, and the image would only rebuild the same sources.
+  changes:
+    name: Image inputs changed?
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read   # the filter lists a pull request's files through the API
+    outputs:
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      # A push is diffed with git (against the default branch, or the previous commit on it).
+      - uses: actions/checkout@v7
+        if: github.event_name != 'pull_request'
+
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            docker:
+              - 'Dockerfile'
+              - '.dockerignore'
+              - 'go.mod'
+              - 'go.sum'
+              - '.github/workflows/main.yml'
+              - '.github/workflows/_docker.yml'
+
+  # Builds the full image (driver + embedded retyc-cli) for both platforms when its build inputs
+  # change, so a broken Dockerfile fails the PR rather than the release; on the default branch it
+  # is always built and pushed (as `master`). `latest` belongs to the release workflow. Any other
+  # branch can still be built on demand with the "Docker (manual)" workflow.
   docker:
     name: Docker
-    needs: ci
+    needs: [ci, changes]
+    if: >-
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'))
+      || github.event_name == 'workflow_dispatch'
+      || needs.changes.outputs.docker == 'true'
     permissions:
       contents: read
       packages: write
