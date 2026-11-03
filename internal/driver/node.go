@@ -19,6 +19,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
@@ -60,6 +61,9 @@ type NodeServer struct {
 	Pods    *mountpod.Manager
 	// Kube reads the claims (their annotations, and their UID for the events).
 	Kube kubernetes.Interface
+	// Dynamic watches the RetycIdentities: a machine enabled again in Retyc revives its volumes
+	// that gave up (see watchIdentities). Nil: they wait for their give-up to expire.
+	Dynamic dynamic.Interface
 	// Events records on the claims what the volume's users must know; nil records nothing.
 	Events record.EventRecorder
 	// IdentityDir holds the driver's own identity (its Secret, mounted), read at each stage without
@@ -76,6 +80,9 @@ type NodeServer struct {
 	locks  keyLock  // by volume ID, as mountpod.Manager requires
 	busy   sync.Map // volume ID → time.Time: a stage or unstage is under way, see markBusy
 	gaveUp sync.Map // volume ID → time.Time: MountGaveUp was reported, then last seen; see stageGaveUp
+	// machine ID → time.Time: when Retyc last accepted it, from the RetycIdentities; see
+	// MachineAccepted.
+	accepted sync.Map
 	// pod UID → struct{}: the exit of a mount pod already reported while kubelet retried the stage,
 	// not to report it again when the pod is released; see reportExitEarly.
 	exitReported sync.Map

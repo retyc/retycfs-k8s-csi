@@ -248,6 +248,7 @@ func newNodeEnvWith(t *testing.T, configure func(*mountpod.Config)) *nodeEnv {
 		MountInfo:   e.mnt.list, Metrics: NewNodeMetrics(),
 	}
 	pods.Prepare = e.s.Prepare
+	pods.MachineAccepted = e.s.MachineAccepted
 
 	return e
 }

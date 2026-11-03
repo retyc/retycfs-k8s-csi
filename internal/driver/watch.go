@@ -7,12 +7,17 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
+	"github.com/retyc/retycfs-k8s-csi/internal/identity"
 	"github.com/retyc/retycfs-k8s-csi/internal/mountpod"
 )
 
@@ -52,6 +57,12 @@ func (s *NodeServer) Watch(ctx context.Context, interval time.Duration) {
 	go func() {
 		if err := s.watchPods(ctx, queue); err != nil {
 			klog.Warningf("watching the mount pods: %v; repairing every %s only", err, interval)
+		}
+	}()
+	go func() {
+		if err := s.watchIdentities(ctx, queue); err != nil {
+			klog.Warningf("watching the RetycIdentities: %v; volumes refused by Retyc are tried again every %s only",
+				err, mountpod.GiveUpRetryAfter)
 		}
 	}()
 	for range repairWorkers {
@@ -115,6 +126,106 @@ func (s *NodeServer) watchPods(ctx context.Context, queue workqueue.TypedDelayin
 	}
 
 	return nil
+}
+
+// watchIdentities starts an informer on the RetycIdentities that revives the volumes of a machine
+// enabled again in Retyc. Each auth check of the enroller that finds a machine accepted sets the
+// identity's checkedAt (Active true): the volumes of the node that gave up on a 77 with that machine
+// before that check are tried again at once, without waiting for their give-up to expire
+// (mountpod.GiveUpRetryAfter). It works whether or not the enroller saw the refusal (a machine
+// disabled and enabled again between two checks), and whatever the order: a 77 recorded after the
+// event is not given up on (see MachineAccepted).
+func (s *NodeServer) watchIdentities(ctx context.Context, queue workqueue.TypedDelayingInterface[string]) error {
+	if s.Pods == nil || s.Dynamic == nil {
+		return errors.New("no Kubernetes client")
+	}
+	factory := dynamicinformer.NewDynamicSharedInformerFactory(s.Dynamic, 0)
+	informer := factory.ForResource(identity.RetycIdentityGVR).Informer()
+	seen := func(obj any) {
+		machineID, at := machineAccepted(obj)
+		if machineID == "" {
+			return
+		}
+		s.noteAccepted(machineID, at)
+		for _, volumeID := range s.Pods.Revive(machineID, at) {
+			queue.Add(volumeID)
+		}
+	}
+	_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    seen,
+		UpdateFunc: func(_, obj any) { seen(obj) },
+	})
+	if err != nil {
+		return err
+	}
+	factory.Start(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
+		return fmt.Errorf("the RetycIdentity informer did not sync: %w", ctx.Err())
+	}
+
+	return nil
+}
+
+// noteAccepted records that Retyc accepted machineID at at, for MachineAccepted.
+func (s *NodeServer) noteAccepted(machineID string, at time.Time) {
+	for {
+		prev, loaded := s.accepted.LoadOrStore(machineID, at)
+		if !loaded || !at.After(prev.(time.Time)) { //nolint:forcetypeassert // only times are stored
+			return
+		}
+		if s.accepted.CompareAndSwap(machineID, prev, at) {
+			return
+		}
+	}
+}
+
+// MachineAccepted returns when Retyc last accepted machineID, as the RetycIdentities seen by the
+// node plugin tell (zero if never): mountpod.Manager's MachineAccepted.
+func (s *NodeServer) MachineAccepted(machineID string) time.Time {
+	if v, ok := s.accepted.Load(machineID); ok {
+		return v.(time.Time) //nolint:forcetypeassert // only times are stored
+	}
+
+	return time.Time{}
+}
+
+// machineAccepted returns the machine ID of a RetycIdentity whose machine Retyc accepts (Active
+// true) and the time of the check that said so (status.checkedAt), "" when it is not accepted or the
+// enroller records no check time (an older enroller).
+func machineAccepted(obj any) (string, time.Time) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return "", time.Time{}
+	}
+	if c := activeCondition(u); c == nil || c.Status != metav1.ConditionTrue {
+		return "", time.Time{}
+	}
+	raw, _, _ := unstructured.NestedString(u.Object, "status", "checkedAt")
+	at, err := time.Parse(time.RFC3339, raw)
+	machineID, _, _ := unstructured.NestedString(u.Object, "status", "machineID")
+	if err != nil || machineID == "" {
+		return "", time.Time{}
+	}
+
+	return machineID, at
+}
+
+// activeCondition is the Active condition of a RetycIdentity, nil when it has none.
+func activeCondition(u *unstructured.Unstructured) *metav1.Condition {
+	raw, _, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+	var conditions []metav1.Condition
+	for _, c := range raw {
+		m, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		var cond metav1.Condition
+		if runtime.DefaultUnstructuredConverter.FromUnstructured(m, &cond) == nil {
+			conditions = append(conditions, cond)
+		}
+	}
+
+	return meta.FindStatusCondition(conditions, identity.ConditionActive)
 }
 
 // ownPod returns obj when it is a mount pod of this node, nil otherwise: a hashed node label may

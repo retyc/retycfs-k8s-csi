@@ -16,6 +16,21 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
+
+// RetycIdentityGVR is the resource of the RetycIdentity objects, which the enroller reconciles and
+// the node plugin watches (a machine enabled again).
+var RetycIdentityGVR = schema.GroupVersionResource{
+	Group: "csi.retycfs.com", Version: "v1alpha1", Resource: "retycidentities",
+}
+
+// The Active condition of a RetycIdentity is the verdict of `retyc auth status` on its machine;
+// ReasonMachineRefused says that Retyc refuses it (disabled or deleted).
+const (
+	ConditionActive      = "Active"
+	ReasonMachineRefused = "MachineRefused"
 )
 
 // Names of the files of an identity, also the keys of a credentials Secret. The first four are
@@ -164,6 +179,18 @@ func (c *Credentials) Key() string {
 	}
 
 	return hex.EncodeToString(h.Sum(nil)[:8])
+}
+
+// MachineID is the machine_id of machine.json, "" when it has none.
+func (c *Credentials) MachineID() string {
+	var m struct {
+		MachineID string `json:"machine_id"`
+	}
+	if c == nil || json.Unmarshal(c.Files[MachineFile], &m) != nil {
+		return ""
+	}
+
+	return m.MachineID
 }
 
 // MachineFiles returns the files the CLI reads in machine mode (client.key, age.key, machine.json),

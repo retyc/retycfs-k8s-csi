@@ -16,7 +16,8 @@ mount runs in its own pod, the **mount pod**, so that the node plugin holds no m
   into every pod that uses the claim, and repairs what dies. It runs no `retyc` process.
 - **Enroller** (`--mode=enroller`, one replica, its own service account): reconciles the `RetycIdentity` objects. For
   each one it runs `retyc machine enroll`, waits for an administrator of the Retyc organization to approve the machine,
-  stores the keys in a Secret of the driver's namespace, and checks the machine every 5 minutes. It is the only writer
+  stores the keys in a Secret of the driver's namespace, and checks the machine every 5 minutes (every 30 s while Retyc
+  refuses it, and right away when a mount pod exits with `77`). It is the only writer
   of those Secrets. It serves no CSI call.
 - **Mount pods**: one per volume and per node, in the driver's namespace, running `retyc fs mount` from the official
   `ghcr.io/retyc/retyc-cli` image. The pod **is** the mount.
@@ -89,9 +90,11 @@ created
 before the pod and owned by it, so the garbage collector deletes it with the pod. Each mount pod has its own
 `RETYC_CONFIG_DIR` in an `emptyDir`: caches never mix between volumes. Machine accounts use no keyring.
 
-The machine's state is checked by the enroller (`retyc auth status` as the machine, every 5 minutes, the `Active`
-condition). A machine disabled or deleted in Retyc fails the mounts with exit `77`; see [Backoff and
-give-up](#backoff-and-give-up).
+The machine's state is checked by the enroller (`retyc auth status` as the machine, every 5 minutes, every 30 s while
+Retyc refuses it, the `Active` condition). The enroller also watches the mount pods: one that exits with `77` has its
+machine (annotation `csi.retycfs.com/machine-id`) checked at once, at most one check per 30 s (counted from the last
+check), so that `Active` goes `False` within seconds rather than at the next 5-minute check. A machine disabled or deleted in Retyc fails the mounts with exit `77`; see
+[Backoff and give-up](#backoff-and-give-up).
 
 A dataroom belongs to the machine that created it, so an identity is also an owner: see
 [configuration.md](configuration.md#dataroom-lifecycle-and-ownership-transfer).
@@ -233,8 +236,16 @@ hash), the volume is unstaged from the node, the node plugin restarts, or someon
 for kubelet: it removes `vol_data.json` and will never unstage the volume, so the next sweep (30 s at most) releases
 the exited pod, its finalizer and its Secret, like any orphan. The give-up itself is remembered for 30 minutes after
 the last stage that found it, so that kubelet's retries keep failing at once (with the last output of the pod) instead
-of logging in again with a refused machine. A give-up on a `77` expires after 15 minutes, for one more try, so that a
-machine enabled again in Retyc gets its mounts back by itself; a give-up on a `78` does not. Any other code may be
+of logging in again with a refused machine. The node plugins watch the `RetycIdentity` objects: every check that
+finds a machine accepted (`Active` `True`) records its time in `status.checkedAt`, and the volumes of the node that
+gave up on a `77` with that machine before that check are tried again at once. This holds whether the enroller saw
+the refusal or not (a machine disabled and enabled again between two checks), and in either order: a `77` that exits
+no later than a check already seen accepted is not given up on. A machine enabled again in Retyc thus gets its staged
+volumes back within a minute (a mount pod's `77` makes the enroller check at once, then every 30 s while refused). A
+volume whose stage failed on the `77` comes back at kubelet's next stage of it, with kubelet's own backoff (up to about
+2 minutes). Times are compared to the second, the pod's exit (kubelet's clock) against the check (the enroller's):
+an exit in the same second as an acceptance is tried once more. As a safety net (the watch down, an enroller older
+than `checkedAt`), a give-up on a `77` also expires after 15 minutes, for one more try; a give-up on a `78` does not. Any other code may be
 transient (API or identity provider unreachable) and is retried
 forever. The backoff lives in the node plugin's memory: a restart of the plugin forgets it.
 
@@ -245,7 +256,7 @@ forever. The backoff lives in the node plugin's memory: a restart of the plugin 
 | `0`   | unmounted, nothing lost (an unstage, or an `umount` of the staging path)                                                                               | nothing                                                                                                                                                                                               |
 | `1`   | any other error, a failure at start included (a Redis that does not answer, a mount point left dead)                                                   | when the node plugin releases the pod: a `MountFailed` event on the claim, unless the output reports lost files (below); recreated with the backoff while the volume is staged                        |
 | `75`  | writes lost: files being written, or background deletes, could not be sent before the filesystem went away (drain timed out or cut short, API refusal) | when the node plugin releases the pod: a `WritesLost` event on the claim; recreated with the backoff while the volume is staged, never a give-up (the mount itself worked)                            |
-| `77`  | the machine account is disabled or deleted in Retyc; it wins over `75` when both happen                                                                | give-up at the first one (one more try 15 minutes later); a `WritesLost` event too if the output reports lost files                                                                                   |
+| `77`  | the machine account is disabled or deleted in Retyc; it wins over `75` when both happen                                                                | give-up at the first one (tried again once a later check finds the machine accepted, or 15 minutes later); a `WritesLost` event too if the output reports lost files                                                                                   |
 | `78`  | the machine account's configuration is refused                                                                                                         | give-up at the first one, until the identity changes                                                                                                                                                  |
 | `137` | killed (`SIGKILL`: `kill -9`, OOM kill, grace period exceeded)                                                                                         | recreated with the backoff, binds restacked; a `MountOOMKilled` event on the claim for an OOM kill, or any `137` while no deletion asked the pod to stop (containerd does not always say `OOMKilled`) |
 

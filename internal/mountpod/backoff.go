@@ -139,6 +139,21 @@ type backoffEntry struct {
 	// staging is the staging path of the last pod seen exit, for the sweep of the volumes gone
 	// (see Volumes).
 	staging string
+	// machineID is the machine account of the last pod seen exit, and exitAt when it exited, for
+	// Revive.
+	machineID string
+	exitAt    time.Time
+}
+
+// podExit is the exit of a mount pod: its UID, exit code, termination message, how long it ran,
+// when it exited and the machine it logged in as.
+type podExit struct {
+	uid       types.UID
+	code      int32
+	message   string
+	ran       time.Duration
+	at        time.Time
+	machineID string
 }
 
 // backoff returns the entry of a volume for a config, starting a fresh one when the config changed.
@@ -155,22 +170,27 @@ func (m *Manager) backoff(volumeID, hash string) *backoffEntry {
 
 // recordExit counts the exit of a pod running the given config on staging, once per pod, and
 // returns the resulting state.
-func (m *Manager) recordExit(
-	volumeID, hash, staging string, uid types.UID, code int32, message string, ran time.Duration,
-) Backoff {
+func (m *Manager) recordExit(volumeID, hash, staging string, x podExit) Backoff {
+	// Outside m.mu: the hook takes the node plugin's own state.
+	accepted := m.acceptedAfter(x)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e := m.backoff(volumeID, hash)
-	if uid != "" && uid == e.lastPod {
+	if x.uid != "" && x.uid == e.lastPod {
 		return e.Backoff
 	}
-	e.lastPod, e.staging = uid, staging
-	if ran >= m.cfg.StableAfter {
+	code := x.code
+	e.lastPod, e.staging, e.machineID, e.exitAt = x.uid, staging, x.machineID, x.at
+	if x.ran >= m.cfg.StableAfter {
 		e.ConsecutiveFailures = 0
 	}
 	e.ConsecutiveFailures++
-	e.LastExitCode, e.LastExitMessage = code, message
-	if isFatal(code) {
+	e.LastExitCode, e.LastExitMessage = code, x.message
+	if accepted {
+		klog.Infof("mountpod: volume %s: exited with 77, but machine %s was accepted by Retyc since: trying again",
+			volumeID, x.machineID)
+		e.FatalExits = 0
+	} else if isFatal(code) {
 		e.FatalExits++
 	} else {
 		e.FatalExits = 0
@@ -189,6 +209,19 @@ func (m *Manager) recordExit(
 	e.NextRestart = m.now().Add(delay)
 
 	return e.Backoff
+}
+
+// acceptedAfter says whether an exit with 77 came no later than Retyc's last acceptance of its
+// machine: refused before the machine was enabled again, so not a reason to give up. Both times have
+// a precision of a second: an exit in the same second as the check counts as before it, one try
+// more at worst.
+func (m *Manager) acceptedAfter(x podExit) bool {
+	if x.code != ExitAuthRequired || x.machineID == "" || m.MachineAccepted == nil {
+		return false
+	}
+	accepted := m.MachineAccepted(x.machineID)
+
+	return !accepted.IsZero() && !x.at.After(accepted)
 }
 
 // backoffState returns the current restart state of a volume for a config.
@@ -239,6 +272,29 @@ func (m *Manager) startOver(volumeID, hash string) {
 	if e := m.backoff(volumeID, hash); e.GaveUp {
 		e.Backoff = Backoff{}
 	}
+}
+
+// Revive clears the give-ups on a 77 of the volumes whose pods logged in as machineID and exited no
+// later than acceptedAt, when Retyc accepted that machine (the checkedAt of its RetycIdentity, Active),
+// and returns those volumes: their next Ensure creates a pod at once instead of waiting for
+// GiveUpUntil. A later 77 stays given up (refused again since), and so does a 78. Same precision as
+// acceptedAfter.
+func (m *Manager) Revive(machineID string, acceptedAt time.Time) []string {
+	if machineID == "" || acceptedAt.IsZero() {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var volumes []string
+	for id, e := range m.backoffs {
+		if e.GaveUp && e.LastExitCode == ExitAuthRequired && e.machineID == machineID && !e.exitAt.After(acceptedAt) {
+			klog.Infof("mountpod: volume %s: machine %s accepted again by Retyc: trying again", id, machineID)
+			e.Backoff = Backoff{}
+			volumes = append(volumes, id)
+		}
+	}
+
+	return volumes
 }
 
 // Forget drops the restart state of a volume, a give-up included: after an explicit

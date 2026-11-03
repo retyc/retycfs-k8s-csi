@@ -251,7 +251,7 @@ spec: # optional
       |---|---|
    | `PHASE` | `Pending`, `Approved`, `Denied`, `Expired`, `Rejected` or `Blocked` |
    | `FINGERPRINT` | the request's fingerprint, to compare before approving |
-   | `ACTIVE` | once approved, whether Retyc still accepts the machine (`False`: disabled or deleted there, checked every 5 minutes) |
+   | `ACTIVE` | once approved, whether Retyc still accepts the machine (`False`: disabled or deleted there, checked every 5 minutes, every 30 s while `False`, at once when a mount pod exits with `77`) |
    | `REASON` (`-o wide`) | why it is not active (`MachineRefused`: disabled or deleted in Retyc) |
    | `MACHINE` | the machine ID in Retyc, once approved |
    | `APPROVAL` (`-o wide`) | where an administrator approves |
@@ -283,11 +283,13 @@ spec: # optional
 `kubectl describe retycidentity default` and the namespace's Events carry the details. A tenant's PVC created before the
 approval stays `Pending`, with an Event giving the fingerprint to compare.
 
-The `Active` condition comes from `retyc auth status` run as the machine every 5 minutes. A machine **disabled or
+The `Active` condition comes from `retyc auth status` run as the machine every 5 minutes, every 30 s while Retyc
+refuses it, and at once when a mount pod exits with `77`. A machine **disabled or
 deleted in Retyc** sets `Active=False` (reason `MachineRefused`): its mounts fail with exit `77`. The machine cannot
 tell the two
 apart; an administrator can (Organization > Machines, or `retyc machine ls`). Disabled: once it is enabled again, the
-mount pods try again by themselves within 15 minutes. Deleted: delete the `RetycIdentity` to enroll a new one. Exit `78`
+`RetycIdentity` is `Active` again within 30 s and the node plugins try its volumes again at once (15 minutes at most
+without that signal). Deleted: delete the `RetycIdentity` to enroll a new one. Exit `78`
 is a configuration error
 (see [troubleshooting.md](troubleshooting.md#exit-codes-of-a-mount-pod)).
 

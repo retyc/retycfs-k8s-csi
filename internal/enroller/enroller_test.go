@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 
 	"github.com/retyc/retycfs-k8s-csi/internal/driver"
 	"github.com/retyc/retycfs-k8s-csi/internal/identity"
+	"github.com/retyc/retycfs-k8s-csi/internal/mountpod"
 	"github.com/retyc/retycfs-k8s-csi/internal/retycclient"
 )
 
@@ -538,6 +540,56 @@ func TestAuthStatusCondition(t *testing.T) {
 	}
 }
 
+// A refused machine is checked again every RefusedAuthInterval, not every AuthInterval: once
+// enabled again in Retyc, it is Active within that delay.
+func TestRefusedMachineCheckedSoon(t *testing.T) {
+	s := oldSecret()
+	s.Labels[LabelNamespaceUID], s.Labels[LabelIdentityUID] = tenantUID, "ri-1"
+	v := newEnv(t, []runtime.Object{s}, identityObj(tenantNS, ObjectName, "ri-1", map[string]any{"organizationID": org}))
+	v.auth = fmt.Errorf("retyc not authenticated: %w", retycclient.ErrMachineRefused)
+	if res := v.run(t, tenantNS); res.after != DefaultRefusedAuthInterval {
+		t.Fatalf("pass of a refused machine: after = %s, want %s", res.after, DefaultRefusedAuthInterval)
+	}
+
+	checked := v.status(t, tenantNS).Status.CheckedAt
+	// Stored with a precision of a second.
+	if checked == nil || v.now.Sub(checked.Time) < 0 || v.now.Sub(checked.Time) >= time.Second {
+		t.Fatalf("checkedAt = %v, want %s", checked, v.now)
+	}
+
+	// A pass in between (a status write, a resync) does not push the check back: it is due
+	// RefusedAuthInterval after the last one.
+	v.auth = nil
+	v.now = v.now.Add(DefaultRefusedAuthInterval / 2)
+	if res := v.run(t, tenantNS); res.after != DefaultRefusedAuthInterval/2 ||
+		meta.IsStatusConditionTrue(v.status(t, tenantNS).Status.Conditions, ConditionActive) {
+		t.Fatalf("pass before RefusedAuthInterval: after = %s, want %s", res.after, DefaultRefusedAuthInterval/2)
+	}
+	v.now = v.now.Add(DefaultRefusedAuthInterval / 2)
+	if res := v.run(t, tenantNS); res.after != 0 {
+		t.Errorf("pass of an accepted machine: after = %s, want 0 (the informer's resync)", res.after)
+	}
+	if !meta.IsStatusConditionTrue(v.status(t, tenantNS).Status.Conditions, ConditionActive) {
+		t.Error("Active not true once accepted again")
+	}
+}
+
+// One delayed pass at most per worker: the last scheduled replaces the previous one.
+func TestWorkerScheduleReplaces(t *testing.T) {
+	w := &worker{}
+	fired := make(chan string, 2)
+	w.schedule(20*time.Millisecond, func() { fired <- "first" })
+	w.schedule(40*time.Millisecond, func() { fired <- "second" })
+	if got := <-fired; got != "second" {
+		t.Fatalf("fired %q, want second", got)
+	}
+	select {
+	case got := <-fired:
+		t.Fatalf("fired %q too", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestMachineName(t *testing.T) {
 	e := &Enroller{ClusterName: strings.Repeat("c", 60)}
 	ri := &RetycIdentity{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant"}}
@@ -635,6 +687,56 @@ func TestRunConcurrentAndInterrupt(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A mount pod that exits with 77 has its machine checked at once, not at the next AuthInterval:
+// Active goes false within RefusedAuthInterval of the last check.
+func TestMountPodRefusedChecksAtOnce(t *testing.T) {
+	s := oldSecret()
+	s.Labels[LabelNamespaceUID], s.Labels[LabelIdentityUID] = tenantUID, "ri-1"
+	v := newEnv(t, []runtime.Object{s}, identityObj(tenantNS, ObjectName, "ri-1", map[string]any{"organizationID": org}))
+	var refused atomic.Bool
+	v.e.Auth = func(context.Context, *identity.Credentials) error {
+		if refused.Load() {
+			return fmt.Errorf("retyc not authenticated: %w", retycclient.ErrMachineRefused)
+		}
+
+		return nil
+	}
+	v.e.Now = time.Now
+	v.e.RefusedAuthInterval = 300 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- v.e.Run(ctx) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	waitFor(t, func() bool {
+		return meta.IsStatusConditionTrue(v.status(t, tenantNS).Status.Conditions, ConditionActive)
+	})
+
+	refused.Store(true)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "retycfs-mount-1", Namespace: driverNS,
+			Labels:      map[string]string{mountpod.LabelManagedBy: "retycfs-k8s-csi"},
+			Annotations: map[string]string{mountpod.AnnotationMachineID: "m-old"},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "mount", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 77}},
+		}}},
+	}
+	if _, err := v.e.Kube.CoreV1().Pods(driverNS).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		c := meta.FindStatusCondition(v.status(t, tenantNS).Status.Conditions, ConditionActive)
+
+		return c != nil && c.Status == metav1.ConditionFalse && c.Reason == ReasonMachineRefused
+	})
 }
 
 func waitFor(t *testing.T, cond func() bool) {

@@ -157,3 +157,20 @@ func TestCheckNamespace(t *testing.T) {
 		}
 	}
 }
+
+func TestMachineID(t *testing.T) {
+	for raw, want := range map[string]string{
+		`{"machine_id":"m-1","client_id":"machine-m-1"}`: "m-1",
+		`{"version":1}`: "",
+		`not json`:      "",
+		``:              "",
+	} {
+		c := &Credentials{Files: map[string][]byte{MachineFile: []byte(raw)}}
+		if got := c.MachineID(); got != want {
+			t.Errorf("MachineID of %q = %q, want %q", raw, got, want)
+		}
+	}
+	if got := (*Credentials)(nil).MachineID(); got != "" {
+		t.Errorf("MachineID of nil = %q", got)
+	}
+}

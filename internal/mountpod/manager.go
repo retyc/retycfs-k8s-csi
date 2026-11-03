@@ -147,6 +147,10 @@ type Manager struct {
 	HTTP *http.Client
 	// Now is the clock of the backoff and of the stuck-pod detection; nil means time.Now.
 	Now func() time.Time
+	// MachineAccepted returns when Retyc last accepted a machine as the node plugin knows it (the
+	// checkedAt of its RetycIdentity while Active), zero if never seen accepted; nil knows none. A 77
+	// exit no later than that is not given up on: the machine was enabled again meanwhile.
+	MachineAccepted func(machineID string) time.Time
 
 	cfg      Config
 	mu       sync.Mutex
@@ -291,6 +295,26 @@ func NodeSelector(nodeName string) string {
 	return labels.SelectorFromSet(labels.Set{LabelManagedBy: managedBy, LabelNode: labelValue(nodeName)}).String()
 }
 
+// Selector selects every mount pod of the driver, on any node.
+func Selector() string {
+	return labels.SelectorFromSet(labels.Set{LabelManagedBy: managedBy}).String()
+}
+
+// RefusedMachine returns the machine a mount pod logged in as when it exited with 77 (Retyc refuses
+// the machine), "" otherwise or when the pod does not record it.
+func RefusedMachine(pod *corev1.Pod) string {
+	if pod == nil || pod.Labels[LabelManagedBy] != managedBy {
+		return ""
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == containerName && cs.State.Terminated != nil && cs.State.Terminated.ExitCode == ExitAuthRequired {
+			return pod.Annotations[AnnotationMachineID]
+		}
+	}
+
+	return ""
+}
+
 // List returns the states of the mount pods of a node, for the recovery loop.
 func (m *Manager) List(ctx context.Context, nodeName string) ([]State, error) {
 	pods, err := m.Kube.CoreV1().Pods(m.cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: NodeSelector(nodeName)})
@@ -363,7 +387,7 @@ func (m *Manager) ensureExisting(ctx context.Context, spec *Spec, hash string, p
 	st := m.stateOf(pod)
 	st.ConfigChanged = st.ConfigHash != hash
 	if m.finished(pod) {
-		m.countExit(spec.VolumeID, hash, &st)
+		m.countExit(spec, hash, &st)
 	}
 	st.Backoff = m.backoffState(spec.VolumeID, hash)
 	if st.Backoff.GaveUp && pod.DeletionTimestamp != nil && m.finished(pod) {
@@ -402,7 +426,8 @@ func absent(spec *Spec, b Backoff) State {
 
 // countExit records the exit of a pod in the backoff, when it ran the config being ensured: an exit
 // with another config says nothing about the new one.
-func (m *Manager) countExit(volumeID, hash string, st *State) {
+func (m *Manager) countExit(spec *Spec, hash string, st *State) {
+	volumeID := spec.VolumeID
 	if st.ConfigHash != hash {
 		return
 	}
@@ -410,10 +435,18 @@ func (m *Manager) countExit(volumeID, hash string, st *State) {
 	if st.ExitCode != nil {
 		code = *st.ExitCode
 	}
-	if t := terminated(st.Pod); t != nil && !t.StartedAt.IsZero() {
-		ran = t.FinishedAt.Sub(t.StartedAt.Time)
+	at := m.now()
+	if t := terminated(st.Pod); t != nil {
+		if !t.StartedAt.IsZero() {
+			ran = t.FinishedAt.Sub(t.StartedAt.Time)
+		}
+		if !t.FinishedAt.IsZero() {
+			at = t.FinishedAt.Time
+		}
 	}
-	b := m.recordExit(volumeID, hash, st.StagingPath, st.Pod.UID, code, st.ExitMessage, ran)
+	b := m.recordExit(volumeID, hash, st.StagingPath, podExit{
+		uid: st.Pod.UID, code: code, message: st.ExitMessage, ran: ran, at: at, machineID: spec.Credentials.MachineID(),
+	})
 	klog.Warningf("mountpod: %s (volume %s) exited with code %d (%s: %s); %d consecutive failures",
 		st.Name, volumeID, code, st.ExitReason, ExitLabel(*st), b.ConsecutiveFailures)
 }
@@ -794,7 +827,8 @@ func (m *Manager) finished(pod *corev1.Pod) bool {
 func gaveUpError(name string, b Backoff) error {
 	if !b.GiveUpUntil.IsZero() {
 		return fmt.Errorf("%w: %s exited %d times in a row, last with code %d (%s); once the machine is enabled "+
-			"again (or with new credentials), the mount is tried again automatically within %s, at %s at the latest",
+			"again, the mount is tried again automatically as soon as its RetycIdentity is Active again (within "+
+			"a minute), or with new credentials; failing that, within %s, at %s at the latest",
 			ErrGaveUp, name, b.FatalExits, b.LastExitCode, ExitMeaning(b.LastExitCode), GiveUpRetryAfter,
 			b.GiveUpUntil.UTC().Format(time.RFC3339))
 	}

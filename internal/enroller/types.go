@@ -11,11 +11,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/retyc/retycfs-k8s-csi/internal/identity"
 )
 
 // GVR is the resource of the RetycIdentity objects.
-var GVR = schema.GroupVersionResource{Group: "csi.retycfs.com", Version: "v1alpha1", Resource: "retycidentities"}
+var GVR = identity.RetycIdentityGVR
 
 // Kind of the RetycIdentity objects.
 const Kind = "RetycIdentity"
@@ -39,7 +40,7 @@ const (
 	// ConditionEnrolled tells where the enrollment stands; its reason drives the retries.
 	ConditionEnrolled = "Enrolled"
 	// ConditionActive is the verdict of `retyc auth status` on an approved machine.
-	ConditionActive = "Active"
+	ConditionActive = identity.ConditionActive
 
 	ReasonPending         = "EnrollmentPending"
 	ReasonApproved        = "Approved"
@@ -50,7 +51,7 @@ const (
 	ReasonBlocked         = "Blocked"
 	ReasonEnrollFailed    = "EnrollFailed"
 	ReasonAuthenticated   = "Authenticated"
-	ReasonMachineRefused  = "MachineRefused"
+	ReasonMachineRefused  = identity.ReasonMachineRefused
 	ReasonAuthCheckFailed = "AuthCheckFailed"
 
 	// Events' reasons.
@@ -89,9 +90,13 @@ type Status struct {
 	Attempts           int32 `json:"attempts,omitempty"`
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// ObservedRetry is the last value of the retry annotation acted on.
-	ObservedRetry string             `json:"observedRetry,omitempty"`
-	Conditions    []metav1.Condition `json:"conditions,omitempty"`
-	Message       string             `json:"message,omitempty"`
+	ObservedRetry string `json:"observedRetry,omitempty"`
+	// CheckedAt is when Retyc last answered `retyc auth status` for the machine, accepted or
+	// refused (the Active condition). The node plugins revive the volumes that gave up on a 77
+	// before a check that found the machine accepted.
+	CheckedAt  *metav1.Time       `json:"checkedAt,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Message    string             `json:"message,omitempty"`
 }
 
 // fromUnstructured decodes a RetycIdentity.
@@ -115,6 +120,10 @@ func (s *Status) DeepCopy() *Status {
 	if s.ExpiresAt != nil {
 		t := *s.ExpiresAt
 		out.ExpiresAt = &t
+	}
+	if s.CheckedAt != nil {
+		t := *s.CheckedAt
+		out.CheckedAt = &t
 	}
 	out.Conditions = nil
 	for _, c := range s.Conditions {
