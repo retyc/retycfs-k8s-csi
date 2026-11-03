@@ -704,6 +704,77 @@ func TestGiveUpOn77Expires(t *testing.T) {
 	}
 }
 
+// Revive clears at once the give-ups on a 77 of the machine accepted again since the exit, and only
+// those: not another machine's, not a 78, not one accepted before the exit.
+func TestReviveMachineAcceptedAgain(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	withMachine := func(volumeID, machineID string) *Spec {
+		spec := testSpec()
+		spec.VolumeID = volumeID
+		spec.Credentials.Files[identity.MachineFile] = []byte(`{"machine_id":"` + machineID + `"}`)
+
+		return spec
+	}
+	refused, other, config := withMachine("dr-1", "m-1"), withMachine("dr-2", "m-2"), withMachine("dr-3", "m-1")
+	for spec, code := range map[*Spec]int32{refused: ExitAuthRequired, other: ExitAuthRequired, config: ExitConfig} {
+		st := e.ensure(spec)
+		e.exit(st.Name, code, time.Second)
+		if _, err := e.m.Ensure(ctx, spec); !errors.Is(err, ErrGaveUp) {
+			t.Fatalf("volume %s, exit %d: %v, want ErrGaveUp", spec.VolumeID, code, err)
+		}
+	}
+
+	exited := e.now
+	if got := e.m.Revive("", exited); got != nil {
+		t.Errorf("Revive(\"\") = %v", got)
+	}
+	if got := e.m.Revive("m-1", exited.Add(-time.Second)); got != nil {
+		t.Errorf("Revive(m-1) accepted before the exit = %v, want none", got)
+	}
+	if got := e.m.Revive("m-1", exited); !slices.Equal(got, []string{"dr-1"}) {
+		t.Fatalf("Revive(m-1) = %v, want [dr-1]", got)
+	}
+	// Long before GiveUpUntil: the exited pod is released and a new one created.
+	if st, err := e.m.Ensure(ctx, refused); err != nil || st.Backoff.GaveUp {
+		t.Fatalf("revived volume: %+v, %v", st.Backoff, err)
+	}
+	if st := e.ensure(refused); st.Phase != PhasePending {
+		t.Errorf("revived volume: phase = %s, want a new pod", st.Phase)
+	}
+	for _, spec := range []*Spec{other, config} {
+		if _, err := e.m.Ensure(ctx, spec); !errors.Is(err, ErrGaveUp) {
+			t.Errorf("volume %s revived: %v", spec.VolumeID, err)
+		}
+	}
+}
+
+// A mount pod records its machine; RefusedMachine returns it once the pod exited with 77 only.
+func TestRefusedMachine(t *testing.T) {
+	e := newEnv(t)
+	spec := testSpec()
+	spec.Credentials.Files[identity.MachineFile] = []byte(`{"machine_id":"m-1"}`)
+	st := e.ensure(spec)
+	if got := e.pod(st.Name).Annotations[AnnotationMachineID]; got != "m-1" {
+		t.Fatalf("annotation %s = %q", AnnotationMachineID, got)
+	}
+	if got := RefusedMachine(e.pod(st.Name)); got != "" {
+		t.Errorf("RefusedMachine of a pending pod = %q", got)
+	}
+	e.exit(st.Name, ExitConfig, time.Second)
+	if got := RefusedMachine(e.pod(st.Name)); got != "" {
+		t.Errorf("RefusedMachine after a 78 = %q", got)
+	}
+	refused := &corev1.ContainerStateTerminated{ExitCode: ExitAuthRequired}
+	e.setContainer(st.Name, corev1.ContainerState{Terminated: refused}, corev1.PodFailed)
+	if got := RefusedMachine(e.pod(st.Name)); got != "m-1" {
+		t.Errorf("RefusedMachine after a 77 = %q, want m-1", got)
+	}
+	if got := RefusedMachine(nil); got != "" {
+		t.Errorf("RefusedMachine(nil) = %q", got)
+	}
+}
+
 func TestBackoffResets(t *testing.T) {
 	e := newEnv(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))

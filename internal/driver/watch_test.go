@@ -3,15 +3,23 @@ package driver
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc/codes"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/retyc/retycfs-k8s-csi/internal/identity"
 	"github.com/retyc/retycfs-k8s-csi/internal/mountpod"
 )
 
@@ -121,5 +129,129 @@ func TestWatchRetryRateLimited(t *testing.T) {
 	// 0 s, 1 s, then 3 s: two tries in 1.5 s, three with a slow first one.
 	if deletes < 2 || deletes > 3 {
 		t.Fatalf("%d tries in %s, want 2 or 3", deletes, minRetryDelay+minRetryDelay/2)
+	}
+}
+
+// identityWith is a RetycIdentity of machine m-1 whose Active condition is status/reason, none
+// when status is "", last checked at checked (none if zero).
+func identityWith(status metav1.ConditionStatus, reason string, checked time.Time) *unstructured.Unstructured {
+	st := map[string]any{"machineID": "m-1"}
+	if status != "" {
+		st["conditions"] = []any{
+			map[string]any{"type": "Enrolled", "status": "True", "reason": "Approved"},
+			map[string]any{"type": identity.ConditionActive, "status": string(status), "reason": reason},
+		}
+	}
+	if !checked.IsZero() {
+		st["checkedAt"] = checked.UTC().Format(time.RFC3339)
+	}
+	u := &unstructured.Unstructured{Object: map[string]any{"status": st}}
+	u.SetAPIVersion("csi.retycfs.com/v1alpha1")
+	u.SetKind("RetycIdentity")
+	u.SetNamespace(testNS)
+	u.SetName("default")
+
+	return u
+}
+
+// A machine counts as accepted at its last check, only when Active is true.
+func TestMachineAccepted(t *testing.T) {
+	at := time.Date(2026, 11, 3, 14, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		obj     any
+		machine string
+	}{
+		{"accepted", identityWith(metav1.ConditionTrue, "Authenticated", at), "m-1"},
+		{"refused", identityWith(metav1.ConditionFalse, identity.ReasonMachineRefused, at), ""},
+		{"check failed", identityWith(metav1.ConditionUnknown, "AuthCheckFailed", at), ""},
+		{"never checked", identityWith("", "", time.Time{}), ""},
+		{"no check time (older enroller)", identityWith(metav1.ConditionTrue, "Authenticated", time.Time{}), ""},
+		{"not an object", "x", ""},
+	} {
+		machine, when := machineAccepted(tc.obj)
+		if machine != tc.machine || (machine != "" && !when.Equal(at)) {
+			t.Errorf("%s: machine = %q at %s, want %q", tc.name, machine, when, tc.machine)
+		}
+	}
+}
+
+// watchIdentitiesEnv stages the volume with machine m-1 and starts the RetycIdentity watch on ri,
+// with a repair worker.
+func watchIdentitiesEnv(t *testing.T, ri *unstructured.Unstructured) (*nodeEnv, dynamic.Interface, context.Context) {
+	t.Helper()
+	e := newNodeEnv(t)
+	machine := filepath.Join(e.s.IdentityDir, identity.MachineFile)
+	if err := os.WriteFile(machine, []byte(`{"machine_id":"m-1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.claim(map[string]string{AnnotationUID: "1000"})
+	e.stageReady()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{identity.RetycIdentityGVR: "RetycIdentityList"}, ri)
+	e.s.Dynamic = dyn
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	queue := newRepairQueue()
+	t.Cleanup(queue.ShutDown)
+	if err := e.s.watchIdentities(ctx, queue); err != nil {
+		t.Fatal(err)
+	}
+	go e.s.repairWorker(ctx, queue)
+
+	return e, dyn, ctx
+}
+
+// A volume that gave up on a 77 is tried again as soon as a later check finds its machine accepted,
+// long before the give-up expires, whether the enroller saw the refusal (Active false, then true) or
+// not (the machine enabled again before its next check: Active stays true, checkedAt moves).
+func TestWatchIdentitiesRevives(t *testing.T) {
+	for _, sawRefusal := range []bool{true, false} {
+		t.Run(fmt.Sprintf("refusal seen %t", sawRefusal), func(t *testing.T) {
+			e := newNodeEnv(t) // for its clock only
+			before := e.clock().Add(-time.Minute)
+			ri := identityWith(metav1.ConditionTrue, "Authenticated", before)
+			if sawRefusal {
+				ri = identityWith(metav1.ConditionFalse, identity.ReasonMachineRefused, before)
+			}
+			e, dyn, ctx := watchIdentitiesEnv(t, ri)
+			old := e.pod().UID
+			e.exit(mountpod.ExitAuthRequired, "machine disabled")
+			e.s.Recover(ctx) // counts the exit: gives up (accepted only before it)
+			if !e.hasEvent(reasonMountGaveUp, "machine disabled") {
+				t.Fatalf("after the 77: no MountGaveUp event in %q", e.eventList())
+			}
+
+			ri = identityWith(metav1.ConditionTrue, "Authenticated", e.clock().Add(5*time.Second))
+			if _, err := dyn.Resource(identity.RetycIdentityGVR).Namespace(testNS).UpdateStatus(ctx, ri,
+				metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			eventually(t, "a new mount pod", func() bool {
+				p, err := e.kube.CoreV1().Pods(testNS).Get(ctx, mountpod.Name(testNode, testVolume), metav1.GetOptions{})
+
+				return err == nil && p.UID != old && p.DeletionTimestamp == nil
+			})
+		})
+	}
+}
+
+// A 77 no later than a check that already found the machine accepted (the event came first) is not
+// given up on.
+func TestWatchIdentitiesAcceptedBeforeExit(t *testing.T) {
+	e := newNodeEnv(t)
+	e, _, ctx := watchIdentitiesEnv(t, identityWith(metav1.ConditionTrue, "Authenticated", e.clock().Add(time.Second)))
+	eventually(t, "the identity seen", func() bool { return !e.s.MachineAccepted("m-1").IsZero() })
+	e.exit(mountpod.ExitAuthRequired, "machine disabled")
+	old := e.pod().UID
+	e.s.Recover(ctx) // counts the exit
+	if e.hasEvent(reasonMountGaveUp, "") {
+		t.Fatal("gave up on a 77 older than the acceptance")
+	}
+	// Restarted after the ordinary backoff, not after GiveUpRetryAfter.
+	e.advance(time.Minute)
+	e.s.Recover(ctx)
+	if p := e.pod(); p.UID == old {
+		t.Fatal("no new mount pod after the backoff")
 	}
 }

@@ -10,12 +10,15 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic/dynamicinformer"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
 	"github.com/retyc/retycfs-k8s-csi/internal/identity"
+	"github.com/retyc/retycfs-k8s-csi/internal/mountpod"
 	"github.com/retyc/retycfs-k8s-csi/internal/retycclient"
 )
 
@@ -25,9 +28,22 @@ type worker struct {
 
 	mu           sync.Mutex
 	cancelEnroll context.CancelFunc
+	// later is the pass scheduled after a delay, if any: one at most, the last scheduled wins, so that
+	// the passes queued by events do not each start a series of delayed passes.
+	later *time.Timer
 	// stopping is set when the object is being deleted: an enrollment of the pass under way, even
 	// one not started yet (the deletion seen between its read and its start), stops at once.
 	stopping bool
+}
+
+// schedule runs f after d, replacing the pass scheduled before, if any.
+func (w *worker) schedule(d time.Duration, f func()) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.later != nil {
+		w.later.Stop()
+	}
+	w.later = time.AfterFunc(d, f)
 }
 
 // passStarting clears the stop of the previous pass: the next one reads the object, deletion
@@ -77,6 +93,7 @@ func (e *Enroller) Run(ctx context.Context) error {
 	e.stopped = false
 	e.workers = map[string]*worker{}
 	e.lastAuth = map[types.UID]time.Time{}
+	e.authDue = map[types.UID]bool{}
 	e.mu.Unlock()
 
 	factory := dynamicinformer.NewDynamicSharedInformerFactory(e.Dynamic, e.authInterval())
@@ -92,6 +109,9 @@ func (e *Enroller) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("watching RetycIdentities: %w", err)
 	}
+	e.mu.Lock()
+	e.identities = informer.GetStore()
+	e.mu.Unlock()
 	factory.Start(ctx.Done())
 	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
 		factory.Shutdown()
@@ -102,7 +122,16 @@ func (e *Enroller) Run(ctx context.Context) error {
 
 		return errors.New("RetycIdentities: the informer did not sync")
 	}
-	klog.Infof("enroller: watching RetycIdentities, Secrets in namespace %s", e.Namespace)
+	// Once the RetycIdentities are known: a pod found exited at the start finds its identity.
+	pods, err := e.watchMountPods(ctx)
+	if err != nil {
+		factory.Shutdown()
+		e.stop()
+
+		return err
+	}
+	defer pods.Shutdown()
+	klog.Infof("enroller: watching RetycIdentities, Secrets and mount pods in namespace %s", e.Namespace)
 
 	sweep := e.SweepInterval
 	if sweep <= 0 {
@@ -212,7 +241,7 @@ func (e *Enroller) work(ctx context.Context, namespace, name string, w *worker) 
 			default:
 			}
 		case res.after > 0:
-			time.AfterFunc(res.after, func() { e.enqueue(ctx, namespace, name) })
+			w.schedule(res.after, func() { e.enqueue(ctx, namespace, name) })
 		case res.gone:
 			e.mu.Lock()
 			if len(w.kick) == 0 {
@@ -226,31 +255,128 @@ func (e *Enroller) work(ctx context.Context, namespace, name string, w *worker) 
 	}
 }
 
-// checkAuth runs `retyc auth status` as the approved identity, at most once per AuthInterval, and
-// sets the Active condition.
+// watchMountPods starts an informer on the mount pods of the driver's namespace: one that exits with
+// 77 (Retyc refuses its machine) has its machine checked at once (see recheck), so that Active goes
+// false within seconds, not at the next AuthInterval; the node plugins then revive its volumes as
+// soon as it is accepted again. Without it, a machine disabled and enabled again between two checks
+// is never seen refused, and its mounts wait for their give-up to expire.
+func (e *Enroller) watchMountPods(ctx context.Context) (informers.SharedInformerFactory, error) {
+	factory := informers.NewSharedInformerFactoryWithOptions(e.Kube, 0, informers.WithNamespace(e.Namespace),
+		informers.WithTweakListOptions(func(o *metav1.ListOptions) { o.LabelSelector = mountpod.Selector() }))
+	_, err := factory.Core().V1().Pods().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) {
+			pod, _ := obj.(*corev1.Pod)
+			if machineID := mountpod.RefusedMachine(pod); machineID != "" {
+				e.recheckMachine(ctx, machineID, pod.Name)
+			}
+		},
+		UpdateFunc: func(oldObj, newObj any) {
+			oldPod, _ := oldObj.(*corev1.Pod)
+			newPod, _ := newObj.(*corev1.Pod)
+			if machineID := mountpod.RefusedMachine(newPod); machineID != "" && mountpod.RefusedMachine(oldPod) == "" {
+				e.recheckMachine(ctx, machineID, newPod.Name)
+			}
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("watching the mount pods: %w", err)
+	}
+	factory.Start(ctx.Done())
+
+	return factory, nil
+}
+
+// recheckMachine checks at once the RetycIdentity of machineID, which the mount pod podName found
+// refused.
+func (e *Enroller) recheckMachine(ctx context.Context, machineID, podName string) {
+	e.mu.Lock()
+	store := e.identities
+	e.mu.Unlock()
+	if store == nil {
+		return
+	}
+	for _, obj := range store.List() {
+		u, ok := obj.(*unstructured.Unstructured)
+		if !ok {
+			continue
+		}
+		if id, _, _ := unstructured.NestedString(u.Object, "status", "machineID"); id != machineID {
+			continue
+		}
+		klog.Infof("enroller: %s/%s: mount pod %s exited with 77: checking machine_id=%s now", u.GetNamespace(),
+			u.GetName(), podName, machineID)
+		e.recheck(ctx, u.GetNamespace(), u.GetName(), u.GetUID())
+	}
+}
+
+// recheck makes the next auth check of an identity due RefusedAuthInterval after the last one and
+// queues a pass: it checks at once if the last check is that old, and otherwise schedules itself
+// for when it is (see nextAuth). Several mount pods refused together make one check.
+func (e *Enroller) recheck(ctx context.Context, namespace, name string, uid types.UID) {
+	e.mu.Lock()
+	if e.authDue == nil {
+		e.authDue = map[types.UID]bool{}
+	}
+	e.authDue[uid] = true
+	e.mu.Unlock()
+	e.enqueue(ctx, namespace, name)
+}
+
+// nextAuth returns how long until the next auth check of an approved identity is due when it comes
+// sooner than the informer's resync: the machine refused, or a recheck asked by a mount pod. The
+// delay runs from the last check, so that the passes in between (status writes, resyncs) do not push
+// it back. ok is false when the resync is soon enough.
+func (e *Enroller) nextAuth(uid types.UID, st *Status) (time.Duration, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !machineRefused(st) && !e.authDue[uid] {
+		return 0, false
+	}
+	wait := e.refusedAuthInterval()
+	if last, ok := e.lastAuth[uid]; ok {
+		wait = last.Add(e.refusedAuthInterval()).Sub(e.now())
+	}
+
+	return max(wait, time.Second), true
+}
+
+// machineRefused says whether the last auth check found the machine disabled or deleted in Retyc.
+func machineRefused(st *Status) bool {
+	c := meta.FindStatusCondition(st.Conditions, ConditionActive)
+
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == ReasonMachineRefused
+}
+
+// checkAuth runs `retyc auth status` as the approved identity, at most once per AuthInterval (per
+// RefusedAuthInterval while the machine is refused, or once a mount pod found it refused), and sets
+// the Active condition.
 func (p *pass) checkAuth(ctx context.Context, creds *identity.Credentials) {
 	e, ri, st := p.e, p.ri, &p.st
 	if e.Auth == nil {
 		return
 	}
+	wasRefused := machineRefused(st)
 	now := e.now()
 	e.mu.Lock()
 	if e.lastAuth == nil {
 		e.lastAuth = map[types.UID]time.Time{}
 	}
-	// A tenth of slack: the informer's resync comes every AuthInterval too.
+	interval := e.authInterval()
+	if wasRefused || e.authDue[ri.UID] {
+		interval = e.refusedAuthInterval()
+	}
+	// A tenth of slack: the informer's resync, or the pass after a refusal, comes every interval too.
 	last, ok := e.lastAuth[ri.UID]
-	if ok && now.Sub(last) < e.authInterval()*9/10 {
+	if ok && now.Sub(last) < interval*9/10 {
 		e.mu.Unlock()
 
 		return
 	}
 	e.lastAuth[ri.UID] = now
+	delete(e.authDue, ri.UID)
 	e.mu.Unlock()
 
 	err := e.Auth(ctx, creds)
-	prev := meta.FindStatusCondition(st.Conditions, ConditionActive)
-	wasRefused := prev != nil && prev.Status == metav1.ConditionFalse && prev.Reason == ReasonMachineRefused
 	cond := metav1.Condition{Type: ConditionActive, ObservedGeneration: ri.Generation}
 	switch {
 	case err == nil:
@@ -275,6 +401,9 @@ func (p *pass) checkAuth(ctx context.Context, creds *identity.Credentials) {
 		klog.Warningf("enroller: %s/%s: auth status: %v", ri.Namespace, ri.Name, err)
 	}
 	meta.SetStatusCondition(&st.Conditions, cond)
+	if cond.Status != metav1.ConditionUnknown {
+		st.CheckedAt = &metav1.Time{Time: now}
+	}
 	if err == nil && wasRefused {
 		klog.Infof("enroller: %s/%s: machine_id=%s accepted again by Retyc", ri.Namespace, ri.Name, st.MachineID)
 	}

@@ -184,7 +184,8 @@ roleRef:
 # Node plugin: reads the claims it stages (their annotations) and records events on them. Before
 # mounting a volume with the driver's own identity (no node-stage secrets), it reads its PV (by name
 # from the claim, else by listing them for the volume handle) and the PV's StorageClass: a tenant
-# class is refused. It checks a tenant identity against the claim's namespace (its UID).
+# class is refused. It checks a tenant identity against the claim's namespace (its UID). It watches
+# the RetycIdentities (their status only): a machine enabled again in Retyc revives its volumes.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -192,6 +193,9 @@ metadata:
   labels:
     {{- include "retycfs-csi.labels" . | nindent 4 }}
 rules:
+  - apiGroups: ["csi.retycfs.com"]
+    resources: ["retycidentities"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get"]
@@ -299,7 +303,7 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ---
 # Enroller, in the driver's namespace only: the identities' Secrets (the admission policy keeps it
-# to those).
+# to those), and the mount pods, read only: one that exits with 77 has its machine checked at once.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -308,6 +312,9 @@ metadata:
   labels:
     {{- include "retycfs-csi.labels" . | nindent 4 }}
 rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "watch"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "create", "update", "delete"]

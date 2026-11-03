@@ -44,6 +44,10 @@ const (
 	// AnnotationSpec holds the mount settings of the pod (owner, options, resources, JSON), from
 	// which SpecOf rebuilds the Spec of a pod to recreate without the claim at hand.
 	AnnotationSpec = driverName + "/spec"
+	// AnnotationMachineID is the machine account the pod logs in as (machine_id of machine.json, not
+	// a secret): the enroller checks that machine at once when the pod exits with 77 (see
+	// RefusedMachine).
+	AnnotationMachineID = driverName + "/machine-id"
 
 	appName         = "retycfs-mount"
 	managedBy       = "retycfs-k8s-csi"
@@ -329,6 +333,9 @@ func (m *Manager) buildPod(spec *Spec, hash, secretName string) *corev1.Pod {
 	meta := m.objectMeta(spec, hash)
 	meta.Finalizers = []string{FinalizerInUse}
 	meta.Annotations[AnnotationSecret] = secretName
+	if id := spec.Credentials.MachineID(); id != "" {
+		meta.Annotations[AnnotationMachineID] = id
+	}
 	// The pod holds a FUSE mount used by other pods: autoscalers must not take its node away.
 	meta.Annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"] = "false"
 	meta.Annotations["karpenter.sh/do-not-disrupt"] = "true"

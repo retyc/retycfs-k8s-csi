@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -36,11 +37,14 @@ const AnnotationRetry = "csi.retycfs.com/retry"
 
 // Defaults of the Enroller's tunables.
 const (
-	DefaultMaxAttempts   = 4
-	DefaultAuthInterval  = 5 * time.Minute
-	DefaultSweepInterval = time.Hour
-	DefaultRetryDelay    = time.Minute
-	DefaultClusterName   = "kubernetes"
+	DefaultMaxAttempts  = 4
+	DefaultAuthInterval = 5 * time.Minute
+	// DefaultRefusedAuthInterval is how often a refused machine is checked again: enabled again in
+	// Retyc, it is seen Active within that delay, and the node plugins try its volumes again.
+	DefaultRefusedAuthInterval = 30 * time.Second
+	DefaultSweepInterval       = time.Hour
+	DefaultRetryDelay          = time.Minute
+	DefaultClusterName         = "kubernetes"
 	// maxNameLength is Retyc's bound on a machine's display name and cluster UID.
 	maxNameLength = 63
 )
@@ -72,15 +76,22 @@ type Enroller struct {
 	// TempDir holds the enrollments' working directories ("" for os.TempDir()).
 	TempDir string
 
-	MaxAttempts   int
-	AuthInterval  time.Duration
-	SweepInterval time.Duration
-	RetryDelay    time.Duration
-	Now           func() time.Time
+	MaxAttempts  int
+	AuthInterval time.Duration
+	// RefusedAuthInterval replaces AuthInterval while the machine is refused.
+	RefusedAuthInterval time.Duration
+	SweepInterval       time.Duration
+	RetryDelay          time.Duration
+	Now                 func() time.Time
 
-	mu            sync.Mutex
-	workers       map[string]*worker
-	lastAuth      map[types.UID]time.Time
+	mu       sync.Mutex
+	workers  map[string]*worker
+	lastAuth map[types.UID]time.Time
+	// authDue are the identities a mount pod found refused (exit 77): their next auth check is due
+	// after RefusedAuthInterval, not AuthInterval (see recheck).
+	authDue map[types.UID]bool
+	// identities is the informer's store of the RetycIdentities, to find one by its machine.
+	identities    cache.Store
 	kubeSystemUID string
 	// keptDirs are the working directories of enrollments whose pending Secret could not be saved,
 	// by RetycIdentity: the next pass resumes from their keys and request.
@@ -111,6 +122,14 @@ func (e *Enroller) authInterval() time.Duration {
 	}
 
 	return DefaultAuthInterval
+}
+
+func (e *Enroller) refusedAuthInterval() time.Duration {
+	if e.RefusedAuthInterval > 0 {
+		return e.RefusedAuthInterval
+	}
+
+	return DefaultRefusedAuthInterval
 }
 
 func (e *Enroller) retryDelay() time.Duration {
@@ -271,6 +290,11 @@ func (p *pass) sync(ctx context.Context, w *worker) result {
 	}
 	if secret != nil && len(secret.Data[identity.MachineFile]) > 0 {
 		p.approved(ctx, secret)
+		// Checked again soon while refused (an administrator may enable it again at any time), or
+		// when a mount pod found it refused and the last check was too recent.
+		if wait, ok := e.nextAuth(ri.UID, st); ok {
+			return result{after: wait}
+		}
 
 		return result{}
 	}
@@ -373,6 +397,9 @@ func (p *pass) approved(ctx context.Context, secret *corev1.Secret) {
 	p.checkAuth(ctx, creds)
 	if c := meta.FindStatusCondition(st.Conditions, ConditionActive); c != nil && c.Status != metav1.ConditionTrue {
 		st.Message = c.Message
+	}
+	if machineRefused(st) {
+		st.Phase = PhaseRefused // still enrolled (Enrolled stays true): only what kubectl shows
 	}
 }
 

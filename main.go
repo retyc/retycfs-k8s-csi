@@ -215,9 +215,17 @@ func nodeServer(o options) (*driver.NodeServer, error) {
 	if url := os.Getenv("RETYC_CACHE_REDIS_URL"); url != "" {
 		cache.RedisURL = url
 	}
-	kube, err := inClusterClient()
+	config, err := rest.InClusterConfig()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("loading the in-cluster Kubernetes config: %w", err)
+	}
+	kube, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("creating the Kubernetes client: %w", err)
+	}
+	dyn, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("creating the dynamic Kubernetes client: %w", err)
 	}
 	pods := mountpod.New(kube, cfg)
 	events, _ := eventRecorder(kube, driver.DriverName+"-node", nodeID)
@@ -226,12 +234,14 @@ func nodeServer(o options) (*driver.NodeServer, error) {
 		Mounter:     mount.New(),
 		Pods:        pods,
 		Kube:        kube,
+		Dynamic:     dyn,
 		Events:      events,
 		IdentityDir: o.identityDir,
 		Cache:       cache,
 		Metrics:     driver.NewNodeMetrics(),
 	}
 	pods.Prepare = node.Prepare
+	pods.MachineAccepted = node.MachineAccepted
 	klog.Infof("node %s: mount pods in namespace %s, image %s", nodeID, namespace, pods.Config().Image)
 
 	return node, nil
