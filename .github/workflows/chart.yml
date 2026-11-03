@@ -96,7 +96,7 @@ jobs:
       # Artifact Hub reads an OCI repository's metadata (artifacthub-repo.yml) from its
       # "artifacthub.io" tag. Pushed on every run so edits to the file reach the registry.
       - name: Set up ORAS
-        uses: oras-project/setup-oras@v1
+        uses: oras-project/setup-oras@v2
 
       - name: Push Artifact Hub metadata
         run: |
