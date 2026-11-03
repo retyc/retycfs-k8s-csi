@@ -6,7 +6,7 @@
 # Each node mounts the claim with its own mount pod. Install the chart with the shared Redis cache
 # (examples/helm-values/redis-values.yaml), so that every mount pod sees the others' pastes at once; with the
 # default memory cache, each mount pod keeps its own listings, and another node's paste may not be
-# found for up to the cache TTL (1 min by default, csi.retycfs.com/cache-ttl).
+# found for up to the cache TTL (5 min here, csi.retycfs.com/cache-ttl).
 #
 # Apply and browse the ingress controller's address (k3s ships Traefik): the rule has no host, so
 # it catches every request.
@@ -29,6 +29,10 @@ metadata:
     # Performance tuning
     csi.retycfs.com/background-delete: "true"
     csi.retycfs.com/unsafe-write: "true"
+    # Lists the whole tree once mounted, so the first requests find the pastes in the cache
+    csi.retycfs.com/warmup: "true"
+    # Keeps the warmed listings for 5 minutes instead of 1
+    csi.retycfs.com/cache-ttl: 5m
 spec:
   accessModes: [ReadWriteMany]
   storageClassName: retycfs-rwx

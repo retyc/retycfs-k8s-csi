@@ -30,3 +30,31 @@ func TestParseMountSettingsLocalFile(t *testing.T) {
 		}
 	}
 }
+
+// warmup-depth: an integer from 0 (every level), as the chart's ValidatingAdmissionPolicy accepts it.
+func TestParseMountSettingsWarmupDepth(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want int // -1: refused
+	}{
+		{"0", 0},
+		{"3", 3},
+		{"007", 7},
+		{"2147483647", 2147483647},
+		{"2147483648", -1},
+		{"-1", -1},
+		{"+2", -1},
+		{"two", -1},
+		{"", -1},
+	} {
+		ms, err := parseMountSettings(map[string]string{AnnotationUID: "1000", AnnotationWarmupDepth: tc.raw})
+		switch {
+		case tc.want < 0 && err == nil:
+			t.Errorf("warmup-depth %q accepted as %d", tc.raw, ms.Options.WarmupDepth)
+		case tc.want >= 0 && err != nil:
+			t.Errorf("warmup-depth %q: %v", tc.raw, err)
+		case tc.want >= 0 && ms.Options.WarmupDepth != tc.want:
+			t.Errorf("warmup-depth %q = %d, want %d", tc.raw, ms.Options.WarmupDepth, tc.want)
+		}
+	}
+}
