@@ -32,7 +32,11 @@ metadata:
     # Lists the whole tree once mounted, so the first requests find the pastes in the cache
     csi.retycfs.com/warmup: "true"
     # Keeps the warmed listings for 5 minutes instead of 1
-    csi.retycfs.com/cache-ttl: 5m
+    csi.retycfs.com/cache-ttl: "5m"
+    # Optional stuff
+    csi.retycfs.com/mount-memory-limit: "666Mi"
+    #csi.retycfs.com/initial-members: "john@doe.com:admin"
+
 spec:
   accessModes: [ReadWriteMany]
   storageClassName: retycfs-rwx

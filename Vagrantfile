@@ -58,9 +58,11 @@ Vagrant.configure("2") do |config|
       lv.memory = 4096
     end
 
-    # Traefik's entrypoints: web (the examples' ingresses) and jaeger (the Jaeger UI).
+    # Traefik's entrypoints: web (the examples' ingresses), jaeger (the Jaeger UI) and prometheus
+    # (the Prometheus UI).
     server.vm.network "forwarded_port", guest: 80, host: 18080
     server.vm.network "forwarded_port", guest: 8081, host: 18081
+    server.vm.network "forwarded_port", guest: 8082, host: 18082
 
     server.vm.synced_folder ".", "/vagrant", type: "rsync",
       rsync__exclude: [".git/", ".vagrant/", "retycfs-k8s-csi", "dist/", ".env.local", ".env.dev"]
@@ -89,9 +91,9 @@ Vagrant.configure("2") do |config|
     SHELL
 
     # Jaeger all-in-one (in-memory storage, the chart's default) collecting the retyc CLI's traces
-    # (OTEL_* in examples/helm-values/*-vagrant-values.yaml), its UI on http://localhost:18081. Traefik gets a
-    # second entrypoint for it; web is made the default one, so host-less ingresses such as the
-    # examples' stay on port 80 instead of also catching the Jaeger port.
+    # (OTEL_* in examples/helm-values/*-vagrant-values.yaml), its UI on http://localhost:18081. Traefik gets an
+    # entrypoint for it, and one for Prometheus (provisioned below); web is made the default one, so
+    # host-less ingresses such as the examples' stay on port 80 instead of also catching these ports.
     server.vm.provision "shell", name: "jaeger", inline: <<~'SHELL'
       set -euo pipefail
       export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
@@ -113,6 +115,12 @@ Vagrant.configure("2") do |config|
                 default: true
               exposedPort: 8081
               protocol: TCP
+            prometheus:
+              port: 8082
+              expose:
+                default: true
+              exposedPort: 8082
+              protocol: TCP
       EOF
 
       helm repo add jaegertracing https://jaegertracing.github.io/helm-charts >/dev/null
@@ -125,6 +133,52 @@ Vagrant.configure("2") do |config|
           annotations:
             traefik.ingress.kubernetes.io/router.entrypoints: jaeger
           hosts: [""]
+      EOF
+    SHELL
+
+    # Prometheus, through the Prometheus Operator, scraping the driver and the mount pods through the
+    # chart's PodMonitors (metrics.podMonitor in examples/helm-values/*-vagrant-values.yaml), its UI on
+    # http://localhost:18082. Only the operator and Prometheus, scraping retycfs only: no Grafana, no
+    # Alertmanager, no exporters, no Kubernetes components, no self-monitoring. Any PodMonitor and
+    # ServiceMonitor of the cluster is picked, with no label required. Before `make vm-helm`, which
+    # needs the CRDs.
+    server.vm.provision "shell", name: "monitoring", inline: <<~'SHELL'
+      set -euo pipefail
+      export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+      helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null
+      helm repo update prometheus-community >/dev/null
+      helm upgrade --install monitoring prometheus-community/kube-prometheus-stack --version 92.17.1 \
+        -n monitoring --create-namespace --wait --timeout 10m -f - <<'EOF'
+      alertmanager: { enabled: false }
+      grafana: { enabled: false }
+      nodeExporter: { enabled: false }
+      kubeStateMetrics: { enabled: false }
+      defaultRules: { create: false }
+      kubeControllerManager: { enabled: false }
+      kubeScheduler: { enabled: false }
+      kubeEtcd: { enabled: false }
+      kubeProxy: { enabled: false }
+      kubeApiServer: { enabled: false }
+      kubelet: { enabled: false }
+      coreDns: { enabled: false }
+      prometheusOperator:
+        serviceMonitor: { selfMonitor: false }
+      prometheus:
+        serviceMonitor: { selfMonitor: false }
+        ingress:
+          enabled: true
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: prometheus
+          hosts: []
+        prometheusSpec:
+          podMonitorSelectorNilUsesHelmValues: false
+          serviceMonitorSelectorNilUsesHelmValues: false
+          scrapeInterval: 15s
+          retention: 2d
+          resources:
+            requests: { memory: 256Mi }
+            limits: { memory: 768Mi }
       EOF
     SHELL
   end
