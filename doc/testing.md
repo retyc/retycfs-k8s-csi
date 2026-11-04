@@ -83,7 +83,7 @@ removes the VMs; recreate them after changing `CLUSTER_MODE`.
   above). `kubectl get retycidentity -A` tells the phase; `Expired` takes the `csi.retycfs.com/retry` annotation
   ([troubleshooting.md](troubleshooting.md#identity-stays-pending-denied-expired-blocked)).
 - A machine disabled in Retyc fails the mounts (exit `77`); enable it again.
-- Privatebin is on http://localhost:18080, Jaeger on http://localhost:18081.
+- Privatebin is on http://localhost:18080, Jaeger on http://localhost:18081, Prometheus on http://localhost:18082.
 
 ## Scenarios to check
 
