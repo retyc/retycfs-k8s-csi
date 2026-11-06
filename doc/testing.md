@@ -8,19 +8,28 @@ make lint test helm-lint
 
 ## Test cluster
 
-k3s in Vagrant VMs (libvirt), against a real Retyc API: use a test organization. Requires `vagrant`, the
-`vagrant-libvirt` plugin, your user in the `libvirt` group, and an administrator of that organization to approve the
-machines (the web app, or the `retyc` CLI).
+k3s in Incus virtual machines, created by OpenTofu, against a real Retyc API: use a test organization. Requires Incus
+(initialized with `sudo incus admin init`, its default answers), your user in the `incus-admin` group, OpenTofu
+(`tofu`), and an administrator of that organization to approve the machines (the web app, or the `retyc` CLI).
 
-### 1. Configure: `.env` and `.env.local`
+`vm/main.tf` describes the VMs (resources, network) and runs their provisioning, by cloud-init
+(`vm/cloud-init-server.yaml`, `vm/cloud-init-agent.yaml`). They run Debian 13 from `images:debian/13/cloud`. Both sit on
+their own Incus network, `retycfs`: the server at `192.168.57.10`, the agent at `192.168.57.11`, the host at
+`192.168.57.1`.
 
-Two files at the repo root say what to deploy. Both the `Vagrantfile` and the Makefile read them.
+If Docker runs on the same host, its firewall drops the traffic Incus routes for its VMs: they get no Internet access.
+Allow the `retycfs` network through Docker's `DOCKER-USER` chain (see Incus' documentation, "Prevent connectivity issues
+with Incus and Docker").
+
+### 1. Configure: `vm/.env` and `vm/.env.local`
+
+Two files in `vm/` say what to deploy. OpenTofu and the Makefile read them.
 
 - **`.env`** is versioned: the team's defaults. Don't put anything personal in it.
 - **`.env.local`** is yours: not versioned, never copied into the VMs. Each line overrides the same line of `.env`. It
   also holds your organization.
 
-Create `.env.local` (`chmod 600 .env.local`):
+Create `vm/.env.local` (`chmod 600 vm/.env.local`):
 
 ```sh
 CLUSTER_CHART=dev                                    # the dev API and this repo's chart (Retyc team only)
@@ -41,12 +50,29 @@ Format: `KEY=value`, no quotes, no `export`. Variables exported in your shell ar
 
 ### 2. Start
 
+The VMs, from `vm/`:
+
 ```sh
-vagrant up                   # one or two VMs, depending on CLUSTER_MODE
+cd vm
+tofu init                    # once: fetches the Incus provider
+tofu apply                   # one or two VMs, depending on CLUSTER_MODE, provisioned (a few minutes)
+```
+
+Then, from the repo root:
+
+```sh
 make image-dev vm-load       # dev only: build the driver and load it into the VMs
 make vm-helm                 # the chart, in the namespace retycfs-system
-vagrant ssh server           # then: kubectl -n retycfs-system get pods
+make shell-server            # then: kubectl -n retycfs-system get pods (make shell-agent: the agent)
 ```
+
+From the host, on the server's address:
+
+| Service    | URL                                                                         |
+|------------|-----------------------------------------------------------------------------|
+| Privatebin | http://192.168.57.10 (once `examples/manifests/privatebin.yaml` is applied) |
+| Jaeger     | http://192.168.57.10:8081                                                   |
+| Prometheus | http://192.168.57.10:8082                                                   |
 
 `make vm-helm` creates `retycfs-system` with the `privileged` Pod Security label and installs the chart with
 `identity.organizationID`. The enroller then requests the cluster's machine account; `vm-helm` returns once the pods are
@@ -54,7 +80,7 @@ ready, without waiting for the approval. Until it is approved, the claims of `re
 from the host:
 
 ```sh
-vagrant ssh server -c "kubectl -n retycfs-system get retycidentity default -o wide"   # FINGERPRINT, enrollment
+incus exec retycfs-csi -- kubectl -n retycfs-system get retycidentity default -o wide   # FINGERPRINT, enrollment
 retyc machine requests
 retyc machine approve <enrollment-id> --fingerprint XXXX-... -y   # the dev org has no master key: -y confirms
 ```
@@ -68,14 +94,16 @@ CLI image into every node:
 
 ```sh
 make image-dev CLI_DEV_TAG=<tag> CLI_PULL=0
-docker save ghcr.io/retyc/retyc-cli-dev:<tag> | vagrant ssh server -c "sudo k3s ctr images import -"
-docker save ghcr.io/retyc/retyc-cli-dev:<tag> | vagrant ssh agent -c "sudo k3s ctr images import -"   # multi mode
+docker save ghcr.io/retyc/retyc-cli-dev:<tag> | incus exec retycfs-csi -- k3s ctr images import -
+docker save ghcr.io/retyc/retyc-cli-dev:<tag> | incus exec retycfs-csi-agent -- k3s ctr images import -   # multi mode
 ```
 
-`mount.image.tag` of `examples/helm-values/dev-vagrant-values.yaml` must name the same tag.
+`mount.image.tag` of `examples/helm-values/dev-vm-values.yaml` must name the same tag.
 
-After a change: `make image-dev vm-load vm-restart` for the driver, `make vm-helm` for the chart. `vagrant destroy -f`
-removes the VMs; recreate them after changing `CLUSTER_MODE`.
+After a change: `make image-dev vm-load vm-restart` for the driver, `make vm-helm` for the chart, which first copies
+this repo into the server, at `/src` (`make vm-sync`, without `vm/.env.local`). `tofu destroy`, in `vm/`, deletes the
+VMs; after a change of `CLUSTER_MODE`, `tofu apply` adds or removes the agent. `make vm-stop` shuts the VMs down,
+keeping them; `tofu apply`, in `vm/`, starts them again.
 
 ### 3. If something is wrong
 
@@ -83,11 +111,13 @@ removes the VMs; recreate them after changing `CLUSTER_MODE`.
   above). `kubectl get retycidentity -A` tells the phase; `Expired` takes the `csi.retycfs.com/retry` annotation
   ([troubleshooting.md](troubleshooting.md#identity-stays-pending-denied-expired-blocked)).
 - A machine disabled in Retyc fails the mounts (exit `77`); enable it again.
-- Privatebin is on http://localhost:18080, Jaeger on http://localhost:18081, Prometheus on http://localhost:18082.
+- A provisioning that failed: `tofu apply` shows the end of its log; all of it with
+  `incus exec retycfs-csi -- cat /var/log/cloud-init-output.log`. `tofu apply -replace=incus_instance.server` starts
+  again (`incus_instance.agent[0]` for the agent).
 
 ## Scenarios to check
 
-In the server (`vagrant ssh server`, `cd /vagrant`):
+In the server (`make shell-server`, `cd /src`):
 
 - `kubectl apply -f examples/manifests/rwx-test.yaml`: the claim is `Bound`; the writer writes, the reader (another UID)
   gets `Permission denied`.

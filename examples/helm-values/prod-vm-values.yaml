@@ -1,10 +1,10 @@
-# The published chart in the test VMs (CLUSTER_CHART=prod, the default of .env): released images and the
+# The published chart in the test VMs (CLUSTER_CHART=prod, the default of vm/.env): released images and the
 # production API. `make vm-helm` adds identity.organizationID from RETYC_ORGANIZATION_ID; the
 # cluster-wide machine account then waits for an approval in Retyc (doc/testing.md). Needs a published
 # chart with machine accounts: until then, CLUSTER_CHART=dev.
 
 # The retyc CLI exports its traces over OTLP as soon as an endpoint is set: to the Jaeger the
-# Vagrantfile provisions (UI on http://localhost:18081).
+# test VM provisions (vm/cloud-init-server.yaml, UI on http://192.168.57.10:8081).
 controller:
   extraEnv:
     - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -20,8 +20,8 @@ mount:
       value: 'retycfs-mount'
 
 # The chart's PodMonitors, and the Redis subchart's exporter sidecar with its ServiceMonitor (in
-# multi mode, with examples/helm-values/redis-values.yaml), scraped by the Prometheus the Vagrantfile
-# provisions (UI on http://localhost:18082).
+# multi mode, with examples/helm-values/redis-values.yaml), scraped by the Prometheus the test VM
+# provisions (vm/cloud-init-server.yaml, UI on http://192.168.57.10:8082).
 metrics:
   podMonitor:
     enabled: true

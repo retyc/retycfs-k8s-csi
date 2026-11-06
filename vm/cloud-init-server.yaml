@@ -1,0 +1,118 @@
+#cloud-config
+# cloud-init of the k3s server (vm/main.tf: incus_instance.server), run at its first boot: k3s, its
+# bundled Traefik serving the examples' ingresses, Helm, Jaeger and Prometheus. A template of vm/main.tf:
+# $${...} are its values.
+package_update: true
+packages: [fuse3, curl, ca-certificates, rsync, jq, vim, htop]
+
+write_files:
+  - path: /etc/modules-load.d/fuse.conf
+    content: "fuse\n"
+  # kubectl and helm without arguments, in login shells (incus shell).
+  - path: /etc/profile.d/k3s.sh
+    content: "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml\n"
+  # Traefik's entrypoints: web (the examples' ingresses, made the default one so that host-less
+  # ingresses stay on port 80), jaeger (the Jaeger UI) and prometheus (the Prometheus UI).
+  - path: /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
+    content: |
+      apiVersion: helm.cattle.io/v1
+      kind: HelmChartConfig
+      metadata:
+        name: traefik
+        namespace: kube-system
+      spec:
+        valuesContent: |-
+          ports:
+            web:
+              asDefault: true
+            jaeger:
+              port: 8081
+              expose:
+                default: true
+              exposedPort: 8081
+              protocol: TCP
+            prometheus:
+              port: 8082
+              expose:
+                default: true
+              exposedPort: 8082
+              protocol: TCP
+  - path: /root/provision.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+      SERVER_IP=${server_ip}
+
+      modprobe fuse
+      test -c /dev/fuse
+
+      # k3s; a 0644 kubeconfig lets any user run kubectl.
+      iface=$(ip -o -4 addr show | awk -v ip="$SERVER_IP" '$4 ~ "^" ip "/" { print $2 }')
+      curl -sfL https://get.k3s.io | K3S_TOKEN=${k3s_token} \
+        INSTALL_K3S_EXEC="server --write-kubeconfig-mode 644 --node-ip $SERVER_IP --flannel-iface $iface" sh -
+      until kubectl wait --for=condition=Ready "node/$(hostname)" --timeout=10s >/dev/null 2>&1; do sleep 2; done
+      kubectl get nodes
+
+      # Helm, the way the driver is deployed (make vm-helm). Debian has no package; the official
+      # installer verifies the release checksum before installing to /usr/local/bin.
+      curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash
+      helm version --short
+
+      # Jaeger all-in-one (in-memory storage, the chart's default) collecting the retyc CLI's
+      # traces (OTEL_* in examples/helm-values/*-vm-values.yaml), its UI on port 8081.
+      helm repo add jaegertracing https://jaegertracing.github.io/helm-charts >/dev/null
+      helm repo update jaegertracing >/dev/null
+      helm upgrade --install jaeger jaegertracing/jaeger --version 4.14.1 \
+        -n jaeger --create-namespace --wait --timeout 5m -f - <<'EOF'
+      jaeger:
+        ingress:
+          enabled: true
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: jaeger
+          hosts: [""]
+      EOF
+
+      # Prometheus, through the Prometheus Operator, scraping the driver and the mount pods
+      # through the chart's PodMonitors (metrics.podMonitor in examples/helm-values/*-vm-values.yaml),
+      # its UI on port 8082. Only the operator and Prometheus, scraping retycfs only: no Grafana,
+      # no Alertmanager, no exporters, no Kubernetes components, no self-monitoring. Any
+      # PodMonitor and ServiceMonitor of the cluster is picked, with no label required.
+      helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null
+      helm repo update prometheus-community >/dev/null
+      helm upgrade --install monitoring prometheus-community/kube-prometheus-stack --version 92.17.1 \
+        -n monitoring --create-namespace --wait --timeout 10m -f - <<'EOF'
+      alertmanager: { enabled: false }
+      grafana: { enabled: false }
+      nodeExporter: { enabled: false }
+      kubeStateMetrics: { enabled: false }
+      defaultRules: { create: false }
+      kubeControllerManager: { enabled: false }
+      kubeScheduler: { enabled: false }
+      kubeEtcd: { enabled: false }
+      kubeProxy: { enabled: false }
+      kubeApiServer: { enabled: false }
+      kubelet: { enabled: false }
+      coreDns: { enabled: false }
+      prometheusOperator:
+        serviceMonitor: { selfMonitor: false }
+      prometheus:
+        serviceMonitor: { selfMonitor: false }
+        ingress:
+          enabled: true
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: prometheus
+          hosts: []
+        prometheusSpec:
+          podMonitorSelectorNilUsesHelmValues: false
+          serviceMonitorSelectorNilUsesHelmValues: false
+          scrapeInterval: 15s
+          retention: 2d
+          resources:
+            requests: { memory: 256Mi }
+            limits: { memory: 768Mi }
+      EOF
+
+runcmd:
+  - [/root/provision.sh]

@@ -1,0 +1,29 @@
+#cloud-config
+# cloud-init of the second node (vm/main.tf: incus_instance.agent), with CLUSTER_MODE=multi, run at its
+# first boot: it waits for the server, then joins it as a k3s agent. A template of vm/main.tf: $${...} are
+# its values.
+package_update: true
+packages: [fuse3, curl, ca-certificates, rsync, jq, vim, htop]
+
+write_files:
+  - path: /etc/modules-load.d/fuse.conf
+    content: "fuse\n"
+  - path: /root/provision.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      SERVER_IP=${server_ip}
+      AGENT_IP=${agent_ip}
+
+      modprobe fuse
+      test -c /dev/fuse
+
+      until curl -skf "https://$SERVER_IP:6443/cacerts" >/dev/null; do sleep 5; done
+      iface=$(ip -o -4 addr show | awk -v ip="$AGENT_IP" '$4 ~ "^" ip "/" { print $2 }')
+      curl -sfL https://get.k3s.io | K3S_TOKEN=${k3s_token} K3S_URL="https://$SERVER_IP:6443" \
+        INSTALL_K3S_EXEC="agent --node-ip $AGENT_IP --flannel-iface $iface" sh -
+      systemctl is-active k3s-agent
+
+runcmd:
+  - [/root/provision.sh]
