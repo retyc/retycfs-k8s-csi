@@ -1,6 +1,7 @@
 /retycfs-k8s-csi
 /dist
-/.vagrant/
 /.idea
 *.swp
-/.env.local
+/vm/.env.local
+/vm/.terraform/
+/vm/terraform.tfstate*

@@ -3,13 +3,12 @@
 .git
 .github
 .idea
-.vagrant
 .media
 charts
 doc
 examples
+vm
 dist
 retycfs-k8s-csi
-Vagrantfile
 Makefile
 *.md

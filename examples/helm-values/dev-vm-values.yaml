@@ -1,13 +1,13 @@
-# This repo's chart in the test VMs (CLUSTER_CHART=dev, set in .env.local): the driver image of
+# This repo's chart in the test VMs (CLUSTER_CHART=dev, set in vm/.env.local): the driver image of
 # `make image-dev vm-load`, the development API and CLI. `make vm-helm` adds identity.organizationID.
 image:
   tag: dev
   pullPolicy: IfNotPresent
 
 # The dev API (https://api.triplesfer.traefik.me) resolves to 127.0.0.1: the pods reach it through
-# the host (192.168.121.1), and accept its certificate with RETYC_INSECURE (a dev build only).
+# the host (192.168.57.1), and accept its certificate with RETYC_INSECURE (a dev build only).
 # The retyc CLI exports its traces over OTLP as soon as an endpoint is set: to the Jaeger the
-# Vagrantfile provisions (UI on http://localhost:18081).
+# test VM provisions (vm/cloud-init-server.yaml, UI on http://192.168.57.10:8081).
 controller:
   extraEnv:
     - name: RETYC_API_BASE_URL
@@ -19,7 +19,7 @@ controller:
     - name: OTEL_SERVICE_NAME
       value: 'retycfs-csi-controller'
   hostAliases:
-    - ip: '192.168.121.1'
+    - ip: '192.168.57.1'
       hostnames: ['api.triplesfer.traefik.me', 'auth.triplesfer.traefik.me']
 
 # Enrolls the machine accounts against the dev API, like the controller.
@@ -34,7 +34,7 @@ enroller:
     - name: OTEL_SERVICE_NAME
       value: 'retycfs-csi-enroller'
   hostAliases:
-    - ip: '192.168.121.1'
+    - ip: '192.168.57.1'
       hostnames: ['api.triplesfer.traefik.me', 'auth.triplesfer.traefik.me']
 
 # The development CLI (no `prod` tag), published from its master: `make image-dev` embeds the same in
@@ -54,12 +54,12 @@ mount:
     - name: OTEL_SERVICE_NAME
       value: 'retycfs-mount'
   hostAliases:
-    - ip: '192.168.121.1'
+    - ip: '192.168.57.1'
       hostnames: ['api.triplesfer.traefik.me', 'auth.triplesfer.traefik.me']
 
 # The chart's PodMonitors, and the Redis subchart's exporter sidecar with its ServiceMonitor (in
-# multi mode, with examples/helm-values/redis-values.yaml), scraped by the Prometheus the Vagrantfile
-# provisions (UI on http://localhost:18082).
+# multi mode, with examples/helm-values/redis-values.yaml), scraped by the Prometheus the test VM
+# provisions (vm/cloud-init-server.yaml, UI on http://192.168.57.10:8082).
 metrics:
   podMonitor:
     enabled: true

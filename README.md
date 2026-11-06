@@ -145,7 +145,7 @@ databases.
 $ make build test lint     # driver
 $ make helm-lint           # chart
 $ make image               # container image
-$ vagrant up               # k3s in Vagrant VMs (.env: dev/prod chart, multi/single node), then: make image-dev vm-load vm-helm
+$ cd vm && tofu apply     # k3s in Incus VMs (vm/.env: dev/prod chart, multi/single node), then: make image-dev vm-load vm-helm
 ```
 
 ## License
