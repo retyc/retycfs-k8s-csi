@@ -220,3 +220,15 @@ Service of the Redis subchart, as the CloudPirates chart names it (cloudpirates.
 {{- end }}
 {{- printf "%s.%s.svc" $name (($r.namespaceOverride | default .Release.Namespace)) }}
 {{- end }}
+
+{{/*
+Prometheus job of the driver components' and the mount pods' series, as the chart's PodMonitors
+name it (<PodMonitor namespace>/<PodMonitor name>). For the exprs of metrics.prometheusRule.
+*/}}
+{{- define "retycfs-csi.metricsJob" -}}
+{{- printf "%s/%s" (.Values.metrics.podMonitor.namespace | default .Release.Namespace) (include "retycfs-csi.fullname" .) }}
+{{- end }}
+
+{{- define "retycfs-csi.mountMetricsJob" -}}
+{{- printf "%s-mount" (include "retycfs-csi.metricsJob" .) }}
+{{- end }}

@@ -70,6 +70,31 @@
             "relabelings": { "type": "array", "items": { "type": "object" } },
             "metricRelabelings": { "type": "array", "items": { "type": "object" } }
           }
+        },
+        "prometheusRule": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "namespace": { "type": "string" },
+            "labels": { "type": "object" },
+            "alertLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+            "groups": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": ["object", "null"],
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "expr": { "type": "string" },
+                    "for": { "type": "string" },
+                    "labels": { "type": "object", "additionalProperties": { "type": "string" } },
+                    "annotations": { "type": "object", "additionalProperties": { "type": "string" } }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },

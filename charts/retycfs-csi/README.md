@@ -80,6 +80,9 @@ StatefulSet's pods stay `Pending` and its events repeat the refusal.
 | `metrics.podMonitor.enabled` | `false` | Create two Prometheus Operator `PodMonitor`s: both driver components, and the mount pods (port `metrics`, 9567) |
 | `metrics.podMonitor.namespace` / `labels` | `""` / `{}` | Where to create them, and labels your Prometheus selects on |
 | `metrics.podMonitor.interval` / `scrapeTimeout` / `relabelings` / `metricRelabelings` | Prometheus defaults | Scrape settings, shared by both |
+| `metrics.prometheusRule.enabled` | `false` | Create a Prometheus Operator `PrometheusRule` with the alerts of `metrics.prometheusRule.groups` (reads the PodMonitors' series) |
+| `metrics.prometheusRule.namespace` / `labels` / `alertLabels` | `""` / `{}` / `{}` | Where to create it, labels your Prometheus selects on, labels added to every alert |
+| `metrics.prometheusRule.groups` | 12 alerts | Alerts by group and name: change one field, set `enabled: false`, or add alerts and groups. `expr` is rendered with `tpl` |
 | `logLevel` | `2` | klog verbosity |
 | `probes.liveness` / `probes.readiness` | see values | Probe timings, shared by both components |
 | `controller.replicas` | `1` | Above 1, `--leader-election` is added to csi-provisioner and csi-resizer (with a Role on leases) |

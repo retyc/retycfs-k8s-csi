@@ -632,6 +632,55 @@ retycfs_token_expiry_seconds < 300                                    # access t
 
 Alert on `retycfs_ops_total{result!="ok"}`: it is what a pod sees as an I/O error.
 
+### Alerts
+
+`metrics.prometheusRule.enabled=true` (with `metrics.podMonitor.enabled=true`) creates a `PrometheusRule` from
+`metrics.prometheusRule.groups`; add the labels your Prometheus' `ruleSelector` matches in
+`metrics.prometheusRule.labels`.
+
+| Alert                           | Group    | Severity | Fires when                                                                                     |
+|---------------------------------|----------|----------|------------------------------------------------------------------------------------------------|
+| `RetycfsCSIDriverDown`          | `driver` | warning  | a controller or node plugin pod is not scraped for 10 min                                      |
+| `RetycfsMountPodExited`         | `driver` | warning  | a node has an exited mount pod for 10 min                                                      |
+| `RetycfsMountPodNotReady`       | `driver` | warning  | a node has a mount pod pending or not ready for 15 min                                         |
+| `RetycfsMountPodOutdated`       | `driver` | info     | a node has mount pods on an older retyc-cli for 24 h                                           |
+| `RetycfsMountPodDown`           | `mount`  | critical | a mount pod is not scraped for 5 min                                                           |
+| `RetycfsFilesystemErrors`       | `mount`  | warning  | operations answer `EIO`, `ENOSPC`, `ESTALE` or an unnamed errno for 5 min                      |
+| `RetycfsUploadErrors`           | `mount`  | warning  | an upload failed in the last 15 min                                                            |
+| `RetycfsBackgroundDeleteErrors` | `mount`  | warning  | a background delete failed in the last 15 min                                                  |
+| `RetycfsTokenRefreshFailing`    | `mount`  | critical | every token check fails for 30 min                                                             |
+| `RetycfsAPIErrors`              | `mount`  | warning  | more than 5 % of the Retyc API requests fail (5xx or transport) for 10 min                     |
+| `RetycfsAPIRateLimited`         | `mount`  | warning  | API requests were given up after retrying on 429 in the last 15 min                            |
+| `RetycfsRedisStoreErrors`       | `mount`  | warning  | Redis operations fail for 5 min (`cache.store: redis`)                                         |
+
+`groups` is a map (group, then alert name), so that values files change a single field rather than the whole list:
+
+```yaml
+metrics:
+  prometheusRule:
+    enabled: true
+    alertLabels:
+      team: storage                     # added to every alert; an alert's own labels win
+    groups:
+      driver:
+        RetycfsMountPodOutdated:
+          enabled: false
+      mount:
+        RetycfsUploadErrors:
+          for: 30m
+      custom:                           # new group retycfs-csi.custom
+        RetycfsSpoolHigh:
+          expr: retycfs_spool_bytes{namespace="{{ .Release.Namespace }}"} > 10e9
+          for: 30m
+          labels: {severity: warning}
+          annotations:
+            summary: "{{ $labels.pod }} holds {{ $value | humanize1024 }}B not uploaded yet"
+```
+
+`expr` is rendered with `tpl` (`{{ .Release.Namespace }}`, and the PodMonitors' jobs with
+`{{ include "retycfs-csi.metricsJob" . }}` and `{{ include "retycfs-csi.mountMetricsJob" . }}`); `annotations` are not,
+so Prometheus' templates are written as is.
+
 `/metrics` listens on the pod IPs without authentication: no file names, no dataroom content. On a cluster that
 restricts pod traffic, open ports `9808` and `9567` to Prometheus, and `9567` to the node plugin (it probes the mount
 pods' `/readyz`), e.g. with a NetworkPolicy in `extraObjects`.

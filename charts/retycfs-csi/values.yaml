@@ -157,6 +157,175 @@ metrics:
     relabelings: []
     # -- Relabelings applied to the scraped series, e.g. to drop the driver's `go_*` families.
     metricRelabelings: []
+  # Alerts on the driver and the mount pods (see doc/configuration.md for the list). They read the
+  # series of the PodMonitors above: enable both.
+  prometheusRule:
+    # -- Create a Prometheus Operator PrometheusRule (needs the monitoring.coreos.com CRDs).
+    enabled: false
+    # -- Namespace of the PrometheusRule; defaults to the release namespace.
+    namespace: ""
+    # -- Extra labels, e.g. the ones your Prometheus' ruleSelector matches.
+    labels: {}
+    # -- Labels added to every alert, e.g. `team: storage`; an alert's own labels win.
+    alertLabels: {}
+    # -- Alerts by group (`retycfs-csi.<group>`) and name. A map, so that a single field can be
+    # changed (`--set metrics.prometheusRule.groups.mount.RetycfsUploadErrors.for=30m`), an alert
+    # turned off (`enabled: false`) or a new one or group added. `expr` is rendered with `tpl`
+    # (`{{ .Release.Namespace }}`, and the PodMonitors' jobs: `retycfs-csi.metricsJob`,
+    # `retycfs-csi.mountMetricsJob`); `annotations` are not, so Prometheus' `{{ $labels.x }}` and
+    # `{{ $value }}` are written as is. Filesystem errors caused by the applications (ENOENT, EEXIST,
+    # EACCES...) are left out of RetycfsFilesystemErrors.
+    # @default -- 4 alerts on the driver, 8 on the mount pods
+    groups:
+      driver:
+        RetycfsCSIDriverDown:
+          expr: up{job="{{ include "retycfs-csi.metricsJob" . }}"} == 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: RetycFS CSI driver pod not scraped
+            description: >-
+              Driver pod {{ $labels.namespace }}/{{ $labels.pod }} has not answered on /metrics for
+              10 minutes. A controller down blocks provisioning and resizing; a node plugin down
+              blocks the mounts of its node and the repair of its mount pods (existing mounts keep
+              working).
+        RetycfsMountPodExited:
+          expr: >-
+            max by (namespace, pod) (retycfs_csi_mount_pods{namespace="{{ .Release.Namespace }}",
+            state="exited"}) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: RetycFS mount pod exited and not restarted
+            description: >-
+              Node plugin {{ $labels.pod }} has {{ $value }} exited mount pod(s) for 10 minutes: the
+              pods using these volumes see a dead mount (ENOTCONN) until it is repaired.
+        RetycfsMountPodNotReady:
+          expr: >-
+            sum by (namespace, pod) (retycfs_csi_mount_pods{namespace="{{ .Release.Namespace }}",
+            state=~"pending|running"}) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: RetycFS mount pod not ready
+            description: >-
+              Node plugin {{ $labels.pod }} has {{ $value }} mount pod(s) pending or not ready for
+              15 minutes: the volumes they serve cannot be mounted.
+        RetycfsMountPodOutdated:
+          expr: >-
+            sum by (namespace, pod)
+            (retycfs_csi_mount_pod_outdated{namespace="{{ .Release.Namespace }}"}) > 0
+          for: 24h
+          labels:
+            severity: info
+          annotations:
+            summary: RetycFS mount pods on an older retyc-cli
+            description: >-
+              Node plugin {{ $labels.pod }} has {{ $value }} mount pod(s) on another retyc-cli
+              version than the configured one for a day. They take the new one at the next remount
+              of their volume.
+      mount:
+        RetycfsMountPodDown:
+          expr: up{job="{{ include "retycfs-csi.mountMetricsJob" . }}"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: RetycFS mount pod not scraped
+            description: >-
+              Mount pod {{ $labels.namespace }}/{{ $labels.pod }} has not answered on /metrics for
+              5 minutes: its FUSE process is likely stuck or gone.
+        RetycfsFilesystemErrors:
+          expr: >-
+            sum by (namespace, pod, op, result) (rate(retycfs_ops_total{namespace="{{ .Release.Namespace }}",
+            result=~"EIO|ENOSPC|ESTALE|other"}[5m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: RetycFS filesystem errors
+            description: >-
+              Mount pod {{ $labels.pod }} answers {{ $labels.op }} with {{ $labels.result }}
+              ({{ $value | humanize }}/s) for 5 minutes: the applications see I/O errors.
+        RetycfsUploadErrors:
+          expr: >-
+            sum by (namespace, pod) (increase(retycfs_uploads_total{namespace="{{ .Release.Namespace }}",
+            result="error"}[15m])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: RetycFS uploads failing
+            description: >-
+              Mount pod {{ $labels.pod }} failed {{ $value | humanize }} upload(s) in the last
+              15 minutes: the content written was not sent to Retyc.
+        RetycfsBackgroundDeleteErrors:
+          expr: >-
+            sum by (namespace, pod)
+            (increase(retycfs_background_deletes_total{namespace="{{ .Release.Namespace }}",
+            result="error"}[15m])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: RetycFS background deletes failing
+            description: >-
+              Mount pod {{ $labels.pod }} failed {{ $value | humanize }} background delete(s) in the
+              last 15 minutes: the files were unlinked on the mount but are still in the dataroom.
+        RetycfsTokenRefreshFailing:
+          expr: >-
+            sum by (namespace, pod) (increase(retycfs_token_refreshes_total{namespace="{{ .Release.Namespace }}",
+            result="error"}[15m])) > 0
+            unless sum by (namespace, pod) (increase(retycfs_token_refreshes_total{namespace="{{ .Release.Namespace }}",
+            result="ok"}[15m])) > 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: RetycFS mount cannot renew its login
+            description: >-
+              Mount pod {{ $labels.pod }} has failed every token check for 30 minutes: the mount
+              stops once its access token expires. Check its identity (RetycIdentity, machine
+              account enabled).
+        RetycfsAPIErrors:
+          expr: >-
+            sum by (namespace, pod) (rate(retycfs_api_requests_total{namespace="{{ .Release.Namespace }}",
+            status=~"5..|error"}[10m]))
+            / sum by (namespace, pod) (rate(retycfs_api_requests_total{namespace="{{ .Release.Namespace }}"}[10m]))
+            > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: RetycFS mount sees Retyc API errors
+            description: >-
+              {{ $value | humanizePercentage }} of the Retyc API requests of mount pod
+              {{ $labels.pod }} fail (5xx or transport error) for 10 minutes.
+        RetycfsAPIRateLimited:
+          expr: >-
+            sum by (namespace, pod)
+            (increase(retycfs_api_rate_limited_total{namespace="{{ .Release.Namespace }}"}[15m])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: RetycFS API requests given up on rate limiting
+            description: >-
+              Mount pod {{ $labels.pod }} gave up {{ $value | humanize }} Retyc API request(s) after
+              retrying on 429 in the last 15 minutes.
+        RetycfsRedisStoreErrors:
+          expr: >-
+            sum by (namespace, pod)
+            (rate(retycfs_store_op_duration_seconds_count{namespace="{{ .Release.Namespace }}",
+            result="error"}[5m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: RetycFS mount cannot reach its Redis cache
+            description: >-
+              Mount pod {{ $labels.pod }} fails its Redis operations ({{ $value | humanize }}/s) for
+              5 minutes (cache.store: redis).
 
 # -- klog verbosity of the driver containers.
 logLevel: 2

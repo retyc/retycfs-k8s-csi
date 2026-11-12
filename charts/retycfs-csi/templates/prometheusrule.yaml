@@ -1,0 +1,37 @@
+{{- /*
+Prometheus Operator alerts on the driver and its mount pods, from metrics.prometheusRule.groups
+(group name -> alert name -> rule). Only `expr` goes through tpl: the annotations keep Prometheus'
+own templates ({{ $labels.x }}, {{ $value }}) as they are.
+*/ -}}
+{{- if .Values.metrics.prometheusRule.enabled }}
+{{- $pr := .Values.metrics.prometheusRule }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "retycfs-csi.fullname" . }}
+  namespace: {{ $pr.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "retycfs-csi.labels" . | nindent 4 }}
+    {{- with $pr.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    {{- range $group, $alerts := $pr.groups }}
+    {{- $rules := list }}
+    {{- range $name, $alert := $alerts }}
+    {{- if and $alert (ne (toString $alert.enabled) "false") }}
+    {{- $rule := dict "alert" $name "expr" (tpl $alert.expr $) }}
+    {{- with $alert.for }}{{ $_ := set $rule "for" . }}{{ end }}
+    {{- with merge (deepCopy ($alert.labels | default dict)) $pr.alertLabels }}{{ $_ := set $rule "labels" . }}{{ end }}
+    {{- with $alert.annotations }}{{ $_ := set $rule "annotations" . }}{{ end }}
+    {{- $rules = append $rules $rule }}
+    {{- end }}
+    {{- end }}
+    {{- if $rules }}
+    - name: retycfs-csi.{{ $group }}
+      rules:
+        {{- toYaml $rules | nindent 8 }}
+    {{- end }}
+    {{- end }}
+{{- end }}
