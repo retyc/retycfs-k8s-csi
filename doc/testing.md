@@ -125,7 +125,7 @@ In the server (`make shell-server`, `cd /src`):
 - Tenant: `kubectl apply -f examples/manifests/tenant.yaml`; the claim stays `Pending` with the fingerprint in its
   events,
   until the namespace's `RetycIdentity` is approved.
-- `csi.retycfs.com/initial-members` on a new claim: the people are members of the dataroom, in Retyc.
+- `csi.retycfs.com/initial-members` on a new claim: the people are members of the storage space, in Retyc.
 - Killing a mount process (`sudo pkill -9 -f '^/retyc fs mount'` on its node): the volume comes back within ~20 s,
   without restarting the pods.
 - Restarting the node plugin pods cuts no mount.
@@ -133,4 +133,4 @@ In the server (`make shell-server`, `cd /src`):
 - Two nodes: `kubectl apply -f examples/manifests/privatebin.yaml` runs PrivateBin on each node; a paste created through
   one is readable at once through the other (Redis). With the memory cache, it can take up to a minute.
 
-`kubectl delete -f examples/manifests/rwx-test.yaml` removes the claim and its dataroom.
+`kubectl delete -f examples/manifests/rwx-test.yaml` removes the claim and its storage space.

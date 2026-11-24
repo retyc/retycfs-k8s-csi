@@ -13,8 +13,9 @@ import (
 	"github.com/retyc/retycfs-k8s-csi/internal/identity"
 )
 
-// Real stderr captured from `retyc --json dataroom rm retyc://0000... -y` on 2026-09-03: the
-// spinner's ANSI escapes precede the JSON payload on the same line.
+// Real stderr captured from `retyc --json dataroom rm retyc://0000... -y` on 2026-09-03, a CLI older
+// than the structured errors and the rename to storage spaces: the spinner's ANSI escapes precede
+// the JSON payload on the same line.
 const realStderr = "\r\x1b[K\x1b[36m⠋\x1b[0m\r\x1b[K\x1b[0m" +
 	`{"error":"deleting dataroom: API error 404: {\"detail\":\"Dataroom not found\"}"}` + "\n"
 
@@ -35,7 +36,7 @@ func TestParseStderrError_NonJSONFallsBackToCleanText(t *testing.T) {
 }
 
 func TestIsNotFound(t *testing.T) {
-	err := &Error{Args: []string{"dataroom", "rm"}, Message: parseStderrError([]byte(realStderr)).Error}
+	err := &Error{Args: []string{"space", "rm"}, Message: parseStderrError([]byte(realStderr)).Error}
 	if !IsNotFound(err) {
 		t.Fatalf("expected IsNotFound for %v", err)
 	}
@@ -101,13 +102,13 @@ func TestAPIRefusals(t *testing.T) {
 // Stderr of a retyc-cli with structured errors (17e7230 on): kind, status and detail beside the
 // message, after the spinner's escapes.
 const structuredStderr = "\r\x1b[K\x1b[36m⠋\x1b[0m\r\x1b[K" +
-	`{"error":"updating dataroom: API error 400: {\"detail\":\"A reservation can only be enlarged\"}",` +
+	`{"error":"updating storage space: API error 400: {\"detail\":\"A reservation can only be enlarged\"}",` +
 	`"kind":"capacity_shrink","status":400,"detail":"A reservation can only be enlarged"}` + "\n"
 
 func TestParseStderrError_Structured(t *testing.T) {
 	got := parseStderrError([]byte(structuredStderr))
 	want := stderrError{
-		Error:  `updating dataroom: API error 400: {"detail":"A reservation can only be enlarged"}`,
+		Error:  `updating storage space: API error 400: {"detail":"A reservation can only be enlarged"}`,
 		Kind:   KindCapacityShrink,
 		Status: 400,
 		Detail: "A reservation can only be enlarged",
@@ -136,7 +137,7 @@ func TestKinds(t *testing.T) {
 		err  error
 		want preds
 	}{
-		{kinded(KindNotFound, "deleting dataroom: API error 404: x"), preds{notFound: true}},
+		{kinded(KindNotFound, "deleting storage space: API error 404: x"), preds{notFound: true}},
 		{kinded(KindPlanExceeded, "API error 400: x"), preds{exhausted: true}},
 		{kinded(KindStorageExceeded, "uploading: x"), preds{exhausted: true}},
 		{kinded(KindCapacityTooSmall, "API error 422: x"), preds{capacity: true}},
@@ -182,17 +183,18 @@ func TestRun_FakeBinary(t *testing.T) {
 	script := `#!/bin/sh
 # $1 is always --json
 case "$2 $3" in
-  "dataroom create") printf '{"id":"dr-1","title":"%s"}\n' "$5" ;;
-  "dataroom ls")     printf '{"items":[{"id":"dr-1","title":"a"}],"total":30,"page":1,"pages":2}\n' ;;
+  "space create")    printf '{"id":"dr-1","title":"%s"}\n' "$5" ;;
+  "space ls")        printf '{"items":[{"id":"dr-1","title":"a"}],"total":30,"page":1,"pages":2}\n' ;;
   "auth status")
     if [ -n "$RETYC_TOKEN" ]; then echo '{"error":"mixed","kind":"config"}' >&2; exit 78; fi
     if [ "$(cat "$RETYC_MACHINE_DIR/client.key" 2>/dev/null)" = "good" ]; then printf '{"authenticated":true}\n'
     elif [ -n "$RETYC_MACHINE_DIR" ]; then printf '{"authenticated":false,"reason":"machine_revoked"}\n'
     else printf '{"authenticated":false,"reason":"no_token"}\n'; fi ;;
-  "dataroom rm")
-    printf '\r\033[K{"error":"deleting dataroom: API error 404: {\\"detail\\":\\"Dataroom not found\\"}"}\n' >&2
+  "space rm")
+    printf '\r\033[K{"error":"deleting storage space: API error 404: {\\"detail\\":\\"Dataroom not found\\"}",' >&2
+    printf '"kind":"not_found","status":404,"detail":"Dataroom not found"}\n' >&2
     exit 1 ;;
-  "dataroom set")
+  "space set")
     printf '{"error":"API error 429: slow down","kind":"rate_limited","status":429}\n' >&2
     exit 1 ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
@@ -205,14 +207,14 @@ esac
 	c := New(fake, nil)
 	ctx := context.Background()
 
-	created, err := c.CreateDataroom(ctx, "pvc-x", nil, nil)
+	created, err := c.CreateSpace(ctx, "pvc-x", nil, nil)
 	if err != nil || created.ID != "dr-1" || created.Title != "pvc-x" {
-		t.Fatalf("CreateDataroom: %+v, %v", created, err)
+		t.Fatalf("CreateSpace: %+v, %v", created, err)
 	}
 
-	list, err := c.ListDatarooms(ctx)
+	list, err := c.ListSpaces(ctx)
 	if err != nil || len(list.Items) != 1 {
-		t.Fatalf("ListDatarooms: %+v, %v", list, err)
+		t.Fatalf("ListSpaces: %+v, %v", list, err)
 	}
 
 	machine := func(key string) *identity.Credentials {
@@ -237,17 +239,17 @@ esac
 		t.Fatalf("the identity directories must be removed, found %v", left)
 	}
 
-	_, err = c.DeleteDataroom(ctx, "dr-404")
+	_, err = c.DeleteSpace(ctx, "dr-404")
 	if !IsNotFound(err) {
-		t.Fatalf("DeleteDataroom: expected not-found, got %v", err)
+		t.Fatalf("DeleteSpace: expected not-found, got %v", err)
 	}
 
 	capacity := int64(20 << 30)
-	err = c.UpdateDataroom(ctx, "dr-1", &capacity, nil)
+	err = c.UpdateSpace(ctx, "dr-1", &capacity, nil)
 	var cliErr *Error
 	if !errors.As(err, &cliErr) || cliErr.Kind != KindRateLimited || cliErr.Status != 429 || !IsRateLimited(err) ||
 		cliErr.Message != "API error 429: slow down" {
-		t.Fatalf("UpdateDataroom: want a rate_limited *Error, got %#v", err)
+		t.Fatalf("UpdateSpace: want a rate_limited *Error, got %#v", err)
 	}
 }
 
@@ -285,48 +287,48 @@ func argsRecorder(t *testing.T, output string, code int) (*Client, func() []stri
 	}
 }
 
-func TestCreateDataroom_SendsCapacityAndVersioning(t *testing.T) {
+func TestCreateSpace_SendsCapacityAndVersioning(t *testing.T) {
 	c, calls := argsRecorder(t, `{"id":"dr-1","title":"pvc-x"}`, 0)
 	capacity, versioning := int64(10<<30), false
-	if _, err := c.CreateDataroom(context.Background(), "pvc-x", &capacity, &versioning); err != nil {
+	if _, err := c.CreateSpace(context.Background(), "pvc-x", &capacity, &versioning); err != nil {
 		t.Fatal(err)
 	}
-	want := "--json dataroom create --title pvc-x --storage-capacity 10GiB --versioning=false"
+	want := "--json space create --title pvc-x --storage-capacity 10GiB --versioning=false"
 	if got := calls(); len(got) != 1 || got[0] != want {
 		t.Fatalf("calls = %q, want %q", got, want)
 	}
 }
 
-func TestUpdateDataroom(t *testing.T) {
+func TestUpdateSpace(t *testing.T) {
 	c, calls := argsRecorder(t, `{"id":"dr-1"}`, 0)
 	ctx := context.Background()
 	capacity, versioning := int64(1500<<20), true
-	if err := c.UpdateDataroom(ctx, "dr-1", &capacity, nil); err != nil {
+	if err := c.UpdateSpace(ctx, "dr-1", &capacity, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.UpdateDataroom(ctx, "dr-1", nil, &versioning); err != nil {
+	if err := c.UpdateSpace(ctx, "dr-1", nil, &versioning); err != nil {
 		t.Fatal(err)
 	}
 	// Nothing to change: the CLI is not run at all.
-	if err := c.UpdateDataroom(ctx, "dr-1", nil, nil); err != nil {
+	if err := c.UpdateSpace(ctx, "dr-1", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
-		"--json dataroom set retyc://dr-1 --storage-capacity 1500MiB -y",
-		"--json dataroom set retyc://dr-1 --versioning=true -y",
+		"--json space set retyc://dr-1 --storage-capacity 1500MiB -y",
+		"--json space set retyc://dr-1 --versioning=true -y",
 	}
 	if got := calls(); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("calls = %q, want %q", got, want)
 	}
 }
 
-func TestUpdateDataroom_CLIError(t *testing.T) {
+func TestUpdateSpace_CLIError(t *testing.T) {
 	c, _ := argsRecorder(t, `{"error":"API error 404: {\"detail\":\"Dataroom not found\"}"}`, 1)
 	versioning := false
-	err := c.UpdateDataroom(context.Background(), "dr-404", nil, &versioning)
+	err := c.UpdateSpace(context.Background(), "dr-404", nil, &versioning)
 	var cliErr *Error
 	if !errors.As(err, &cliErr) || !IsNotFound(err) {
-		t.Fatalf("UpdateDataroom: want a not-found *Error, got %v", err)
+		t.Fatalf("UpdateSpace: want a not-found *Error, got %v", err)
 	}
 }
 
@@ -381,7 +383,7 @@ func TestExitCodes(t *testing.T) {
 	} {
 		c, _ := argsRecorder(t, tc.stderr, tc.code)
 		versioning := true
-		err := c.UpdateDataroom(context.Background(), "dr-1", nil, &versioning)
+		err := c.UpdateSpace(context.Background(), "dr-1", nil, &versioning)
 		var cliErr *Error
 		if !errors.As(err, &cliErr) || cliErr.ExitCode != tc.code || IsMachineRefused(err) != tc.refused ||
 			IsConfig(err) != tc.config {
@@ -429,7 +431,7 @@ func TestAddMember(t *testing.T) {
 	if err := c.AddMember(context.Background(), "dr-1", "a@b.fr", RoleAdmin); err != nil {
 		t.Fatal(err)
 	}
-	if got := calls(); len(got) != 1 || got[0] != "--json dataroom user add --role admin -- dr-1 a@b.fr" {
+	if got := calls(); len(got) != 1 || got[0] != "--json space user add --role admin -- dr-1 a@b.fr" {
 		t.Fatalf("calls = %q", got)
 	}
 }

@@ -26,7 +26,7 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "retycfs-csi.controller.serviceAccountName" . }}
-      # The controller finishes adding the initial members of a dataroom it just created (at most
+      # The controller finishes adding the initial members of a storage space it just created (at most
       # 5 minutes) before it exits; it exits at once when there are none.
       terminationGracePeriodSeconds: 330
       {{- with .Values.imagePullSecrets }}
@@ -65,7 +65,7 @@ spec:
           imagePullPolicy: {{ .Values.controller.resizer.image.pullPolicy }}
           args:
             - --csi-address=/csi/csi.sock
-            # Each call runs `retyc dataroom set` (token refresh, API round-trips): 10 s by default is short.
+            # Each call runs `retyc space set` (token refresh, API round-trips): 10 s by default is short.
             - --resize-timeout=60s
             - --modify-timeout=60s
             {{- if and (eq (include "retycfs-csi.leaderElection" .) "true") (not (has "--leader-election" .Values.controller.resizer.extraArgs)) }}

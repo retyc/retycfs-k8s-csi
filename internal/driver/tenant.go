@@ -105,7 +105,7 @@ const nodeStageSecretParam = "csi.storage.k8s.io/node-stage-secret-name" //nolin
 // NodeStageVolume carries neither the PV name nor its class, so the PV is found from the claim's
 // spec.volumeName when the volume context names a claim, else by listing the PVs of the driver
 // for the volume handle; every PV of the handle is checked, so a global PV written on the same
-// dataroom cannot let a tenant one through. No PV at all refuses: kubelet only stages a volume
+// space cannot let a tenant one through. No PV at all refuses: kubelet only stages a volume
 // that has one. A class not found does not refuse: a class deleted since gives nothing to check.
 // An API error is Unavailable: kubelet retries.
 func (s *NodeServer) checkDefaultIdentity(

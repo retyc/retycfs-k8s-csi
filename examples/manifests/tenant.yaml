@@ -29,8 +29,8 @@ metadata:
   namespace: team-a
   annotations:
     csi.retycfs.com/uid: "1000"   # owner of the files: the UID the pods below run as
-    # People added to the dataroom when it is created, never re-applied (role admin, editor or
-    # viewer, the default). Keep a human admin: see "Dataroom lifecycle" in doc/configuration.md.
+    # People added to the storage space when it is created, never re-applied (role admin, editor or
+    # viewer, the default). Keep a human admin: see "Storage space lifecycle" in doc/configuration.md.
     # csi.retycfs.com/initial-members: "alice@example.com:admin,bob@example.com:editor"
 spec:
   accessModes: [ReadWriteMany]

@@ -23,8 +23,8 @@ import (
 )
 
 // ControllerServer implements csi.ControllerServer by execing the retyc CLI. 1 CSI volume = 1
-// Retyc dataroom, titled after the CSI-generated volume name (req.GetName(), always unique), and
-// identified by the dataroom ID (the volume handle).
+// Retyc storage space, titled after the CSI-generated volume name (req.GetName(), always unique),
+// and identified by the space ID (the volume handle).
 type ControllerServer struct {
 	csi.UnimplementedControllerServer
 	// Retyc runs the CLI with the driver's environment and no identity: each request gets a copy
@@ -157,13 +157,13 @@ func parseMutableParameters(params map[string]string) (versioning *bool, err err
 	return versioning, nil
 }
 
-// MinDataroomCapacity is the smallest storage reservation the Retyc API accepts for a dataroom
+// MinSpaceCapacity is the smallest storage reservation the Retyc API accepts for a storage space
 // (20 GiB: below it, 422 "must be at least 21474836480 bytes"). A smaller request is rounded up to
 // it, as a block storage rounds up to its allocation unit, and the volume reports the real size.
-const MinDataroomCapacity int64 = 20 << 30
+const MinSpaceCapacity int64 = 20 << 30
 
 // reservedBytes validates a capacity range and returns the reservation to make: its required bytes
-// rounded up to MinDataroomCapacity, or 0 (no reservation, the owner's plan bounds the dataroom)
+// rounded up to MinSpaceCapacity, or 0 (no reservation, the owner's plan bounds the space)
 // when the range is unset. A limit below the floor cannot be met: OutOfRange.
 func reservedBytes(r *csi.CapacityRange) (int64, error) {
 	required, limit := r.GetRequiredBytes(), r.GetLimitBytes()
@@ -177,12 +177,12 @@ func reservedBytes(r *csi.CapacityRange) (int64, error) {
 	if required == 0 && limit == 0 {
 		return 0, nil
 	}
-	if limit > 0 && limit < MinDataroomCapacity {
+	if limit > 0 && limit < MinSpaceCapacity {
 		return 0, status.Errorf(codes.OutOfRange,
-			"limit_bytes %d is below the smallest dataroom reservation, %d bytes (20 GiB)", limit, MinDataroomCapacity)
+			"limit_bytes %d is below the smallest storage space reservation, %d bytes (20 GiB)", limit, MinSpaceCapacity)
 	}
 
-	return max(required, MinDataroomCapacity), nil
+	return max(required, MinSpaceCapacity), nil
 }
 
 func (s *ControllerServer) CreateVolume(
@@ -228,18 +228,18 @@ func (s *ControllerServer) CreateVolume(
 		return nil, err
 	}
 
-	// Idempotency (CSI requires CreateVolume to be safely retriable): if a dataroom titled `name`
+	// Idempotency (CSI requires CreateVolume to be safely retriable): if a storage space titled `name`
 	// already exists, reuse it instead of creating a duplicate. This runs before the quota check
-	// so that a retry after a lost response still succeeds when that dataroom used the last slot.
+	// so that a retry after a lost response still succeeds when that space used the last slot.
 	// Best-effort: there is no unique constraint on the backend, a racing double-create is still
 	// possible.
-	existing, err := retyc.ListDatarooms(ctx)
+	existing, err := retyc.ListSpaces(ctx)
 	if err != nil {
-		return nil, apiError(err, "listing datarooms")
+		return nil, apiError(err, "listing storage spaces")
 	}
 	for _, dr := range existing.Items {
 		if dr.Title == name {
-			// CSI: the same name with an incompatible capacity is AlreadyExists. A dataroom
+			// CSI: the same name with an incompatible capacity is AlreadyExists. A space
 			// without reservation (nil) is bounded by the owner's plan: nothing to compare, the
 			// requested size is reported as is.
 			reserved := capacity
@@ -248,15 +248,15 @@ func (s *ControllerServer) CreateVolume(
 				limit := req.GetCapacityRange().GetLimitBytes()
 				if reserved < capacity || (limit > 0 && reserved > limit) {
 					return nil, status.Errorf(codes.AlreadyExists,
-						"dataroom %q for volume %q reserves %d bytes, incompatible with the requested range (required %d, limit %d)",
+						"storage space %q for volume %q reserves %d bytes, incompatible with the requested range (required %d, limit %d)",
 						dr.ID, name, reserved, capacity, limit)
 				}
 			}
-			klog.Infof("CreateVolume: reusing existing dataroom %q for volume %q", dr.ID, name)
+			klog.Infof("CreateVolume: reusing existing storage space %q for volume %q", dr.ID, name)
 			if len(members) > 0 {
-				// Members are added by the call that creates the dataroom only (see addInitialMembers),
+				// Members are added by the call that creates the space only (see addInitialMembers),
 				// possibly still running: nothing to report here, it reports its own failures.
-				s.event(pvc, corev1.EventTypeNormal, reasonInitialMembers, "Dataroom %s of volume %s already exists: "+
+				s.event(pvc, corev1.EventTypeNormal, reasonInitialMembers, "Storage space %s of volume %s already exists: "+
 					"its initial members (%s) are managed by the attempt that created it", dr.ID, name, AnnotationInitialMembers)
 			}
 
@@ -271,8 +271,8 @@ func (s *ControllerServer) CreateVolume(
 	if quota.IsUploadReadOnly {
 		return nil, status.Error(codes.ResourceExhausted, "retyc account storage quota exceeded (read-only)")
 	}
-	if !quota.HasDataroomQuota() {
-		return nil, status.Errorf(codes.ResourceExhausted, "retyc account dataroom limit reached (%d/%d)",
+	if !quota.HasSpaceQuota() {
+		return nil, status.Errorf(codes.ResourceExhausted, "retyc account storage space limit reached (%d/%d)",
 			quota.CountDataroom, *quota.MaxCountDataroom)
 	}
 
@@ -281,11 +281,11 @@ func (s *ControllerServer) CreateVolume(
 	if capacity > 0 {
 		reservation = &capacity
 	}
-	result, err := retyc.CreateDataroom(ctx, name, reservation, versioning)
+	result, err := retyc.CreateSpace(ctx, name, reservation, versioning)
 	if err != nil {
-		return nil, apiError(err, "creating dataroom for volume %q", name)
+		return nil, apiError(err, "creating storage space for volume %q", name)
 	}
-	klog.Infof("CreateVolume: created dataroom %q for volume %q (%d bytes)", result.ID, name, capacity)
+	klog.Infof("CreateVolume: created storage space %q for volume %q (%d bytes)", result.ID, name, capacity)
 	s.startInitialMembers(ctx, retyc, pvc, result.ID, members)
 
 	return createVolumeResponse(result.ID, capacity, pvcName, pvcNamespace), nil
@@ -392,12 +392,12 @@ func (s *ControllerServer) startInitialMembers(
 	s.members.Go(func() { s.addInitialMembers(ctx, retyc, pvc, id, members) })
 }
 
-// addInitialMembers adds the claim's initial members to the dataroom just created, once: a failure
-// does not fail the volume, whose dataroom exists, and is not retried, but reported on the claim
-// (whoever owns the claim adds the members by hand). Only the call that creates the dataroom adds
+// addInitialMembers adds the claim's initial members to the storage space just created, once: a
+// failure does not fail the volume, whose space exists, and is not retried, but reported on the claim
+// (whoever owns the claim adds the members by hand). Only the call that creates the space adds
 // them, never a retry that finds it, so that they are never added again in a loop; and they run
 // in the background, detached from the request, so that the provisioner giving up on a slow call does not cut them
-// short. With no admin added, the machine alone can transfer the dataroom: that is reported too.
+// short. With no admin added, the machine alone can transfer the space: that is reported too.
 func (s *ControllerServer) addInitialMembers(
 	ctx context.Context, retyc *retycclient.Client, pvc *corev1.PersistentVolumeClaim, id string, members []member,
 ) {
@@ -407,22 +407,22 @@ func (s *ControllerServer) addInitialMembers(
 	admins := 0
 	for _, m := range members {
 		if err := retyc.AddMember(ctx, id, m.Email, m.Role); err != nil {
-			klog.Warningf("CreateVolume: dataroom %q: adding %s as %s: %v", id, m.Email, m.Role, err)
+			klog.Warningf("CreateVolume: space %q: adding %s as %s: %v", id, m.Email, m.Role, err)
 			failed = append(failed, fmt.Sprintf("%s as %s (%v)", m.Email, m.Role, err))
 
 			continue
 		}
-		klog.Infof("CreateVolume: dataroom %q: added %s as %s", id, m.Email, m.Role)
+		klog.Infof("CreateVolume: space %q: added %s as %s", id, m.Email, m.Role)
 		if m.Role == roleAdmin {
 			admins++
 		}
 	}
 	if len(failed) > 0 {
-		s.event(pvc, corev1.EventTypeWarning, reasonInitialMembers, "Dataroom %s: could not add %s; the driver does "+
-			"not retry: add them with `retyc dataroom user add`", id, strings.Join(failed, ", "))
+		s.event(pvc, corev1.EventTypeWarning, reasonInitialMembers, "Storage space %s: could not add %s; the driver "+
+			"does not retry: add them with `retyc space user add`", id, strings.Join(failed, ", "))
 	}
 	if admins == 0 {
-		s.event(pvc, corev1.EventTypeWarning, reasonNoAdmin, "Dataroom %s has no human admin (annotation %s): it can "+
+		s.event(pvc, corev1.EventTypeWarning, reasonNoAdmin, "Storage space %s has no human admin (annotation %s): it can "+
 			"only be transferred while its machine account is active", id, AnnotationInitialMembers)
 	}
 }
@@ -435,8 +435,8 @@ func (s *ControllerServer) event(pvc *corev1.PersistentVolumeClaim, eventType, r
 	s.Events.Eventf(pvc, eventType, reason, format, args...)
 }
 
-// createVolumeResponse builds the CSI response for a dataroom. The requested capacity is the
-// dataroom's reservation. VolumeContext names the claim, whose annotations NodeStageVolume reads.
+// createVolumeResponse builds the CSI response for a storage space. The requested capacity is the
+// space's reservation. VolumeContext names the claim, whose annotations NodeStageVolume reads.
 func createVolumeResponse(id string, capacity int64, pvcName, pvcNamespace string) *csi.CreateVolumeResponse {
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
@@ -463,26 +463,26 @@ func (s *ControllerServer) DeleteVolume(
 		return nil, err
 	}
 
-	_, err = retyc.DeleteDataroom(ctx, id)
+	_, err = retyc.DeleteSpace(ctx, id)
 	if err != nil {
-		// DeleteVolume must be idempotent: a dataroom already gone (e.g. a retried call after a
+		// DeleteVolume must be idempotent: a storage space already gone (e.g. a retried call after a
 		// prior successful delete) is success, not an error.
 		if retycclient.IsNotFound(err) {
-			klog.Infof("DeleteVolume: dataroom %q already gone, treating as success", id)
+			klog.Infof("DeleteVolume: storage space %q already gone, treating as success", id)
 
 			return &csi.DeleteVolumeResponse{}, nil
 		}
 
-		return nil, apiError(err, "deleting dataroom %q", id)
+		return nil, apiError(err, "deleting storage space %q", id)
 	}
-	klog.Infof("DeleteVolume: deleted dataroom %q", id)
+	klog.Infof("DeleteVolume: deleted storage space %q", id)
 
 	return &csi.DeleteVolumeResponse{}, nil
 }
 
-// ControllerExpandVolume enlarges the dataroom's reservation on the owner's plan. Nothing to do
+// ControllerExpandVolume enlarges the storage space's reservation on the owner's plan. Nothing to do
 // on the node (NodeExpansionRequired is false): the reservation is enforced by the API at once, and
-// a running mount reports it (df, statfs) once its cached dataroom stats expire (the cache TTL,
+// a running mount reports it (df, statfs) once its cached space stats expire (the cache TTL,
 // 1 min by default).
 func (s *ControllerServer) ControllerExpandVolume(
 	ctx context.Context, req *csi.ControllerExpandVolumeRequest,
@@ -507,25 +507,25 @@ func (s *ControllerServer) ControllerExpandVolume(
 	// succeeds), but a smaller one is a shrink the API refuses, and CSI wants a volume already at
 	// or above the request to succeed with its real size. So the current reservation is read first,
 	// and `set` skipped when it already covers the request: a reservation made larger elsewhere (the
-	// web app, the CLI, a reused dataroom) is reported as is rather than refused. A dataroom missing
+	// web app, the CLI, a reused space) is reported as is rather than refused. A space missing
 	// from the listing falls through to `set`, which reports NotFound.
-	list, err := retyc.ListDatarooms(ctx)
+	list, err := retyc.ListSpaces(ctx)
 	if err != nil {
-		return nil, apiError(err, "listing datarooms")
+		return nil, apiError(err, "listing storage spaces")
 	}
 	for _, dr := range list.Items {
 		if dr.ID == id && dr.StorageCapacity != nil && *dr.StorageCapacity >= capacity {
-			klog.Infof("ControllerExpandVolume: dataroom %q already reserves %d bytes", id, *dr.StorageCapacity)
+			klog.Infof("ControllerExpandVolume: storage space %q already reserves %d bytes", id, *dr.StorageCapacity)
 
 			return &csi.ControllerExpandVolumeResponse{
 				CapacityBytes: *dr.StorageCapacity, NodeExpansionRequired: false,
 			}, nil
 		}
 	}
-	if err := retyc.UpdateDataroom(ctx, id, &capacity, nil); err != nil {
+	if err := retyc.UpdateSpace(ctx, id, &capacity, nil); err != nil {
 		return nil, updateError(id, err)
 	}
-	klog.Infof("ControllerExpandVolume: dataroom %q now reserves %d bytes", id, capacity)
+	klog.Infof("ControllerExpandVolume: storage space %q now reserves %d bytes", id, capacity)
 
 	return &csi.ControllerExpandVolumeResponse{CapacityBytes: capacity, NodeExpansionRequired: false}, nil
 }
@@ -555,21 +555,21 @@ func (s *ControllerServer) ControllerModifyVolume(
 	if err != nil {
 		return nil, err
 	}
-	if err := retyc.UpdateDataroom(ctx, id, nil, versioning); err != nil {
+	if err := retyc.UpdateSpace(ctx, id, nil, versioning); err != nil {
 		return nil, updateError(id, err)
 	}
-	klog.Infof("ControllerModifyVolume: dataroom %q versioning=%t", id, *versioning)
+	klog.Infof("ControllerModifyVolume: storage space %q versioning=%t", id, *versioning)
 
 	return &csi.ControllerModifyVolumeResponse{}, nil
 }
 
-// updateError maps a `dataroom set` failure to a CSI status.
+// updateError maps a `space set` failure to a CSI status.
 func updateError(id string, err error) error {
 	if retycclient.IsNotFound(err) {
-		return status.Errorf(codes.NotFound, "dataroom %q not found: %v", id, err)
+		return status.Errorf(codes.NotFound, "storage space %q not found: %v", id, err)
 	}
 
-	return apiError(err, "updating dataroom %q", id)
+	return apiError(err, "updating storage space %q", id)
 }
 
 // apiError maps a failure of the CLI to a CSI status, prefixed with what was being done, from the

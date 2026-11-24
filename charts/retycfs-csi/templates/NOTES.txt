@@ -60,7 +60,7 @@ StorageClasses:
 {{- end }}
 {{- end }}
 
-A ReadWriteMany claim on one of them is a Retyc dataroom shared by every pod that mounts it. The claim needs the
+A ReadWriteMany claim on one of them is a Retyc storage space shared by every pod that mounts it. The claim needs the
 csi.retycfs.com/uid annotation: every file belongs to that UID, and only pods running as it can write.
 {{- if and .Values.admissionPolicy.enabled $classes }}
 The ValidatingAdmissionPolicy {{ include "retycfs-csi.fullname" . }}-pvc-annotations checks the csi.retycfs.com/* annotations.

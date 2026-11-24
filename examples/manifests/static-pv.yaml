@@ -1,5 +1,5 @@
-# Re-adopt an existing dataroom (e.g. one left behind by a retycfs-rwx-retain PVC, or created by
-# hand) as a static PV. The CSI volume handle is the dataroom ID, from `retyc --json dataroom ls`.
+# Re-adopt an existing storage space (e.g. one left behind by a retycfs-rwx-retain PVC, or created by
+# hand) as a static PV. The CSI volume handle is the storage space ID, from `retyc --json space ls`.
 #
 # The mount settings are read at stage from volumeAttributes, with the same keys as the PVC
 # annotations (csi.retycfs.com/uid is mandatory: every file of the mount belongs to it, and only a pod
@@ -10,13 +10,13 @@
 # On a tenant StorageClass (one with node-stage secrets, such as retycfs-rwx-tenant), the PV must
 # name the tenant's identity Secret itself (nodeStageSecretRef below, in the driver's namespace):
 # kubelet reads it from the PV, not from the class. Without it the node plugin refuses the stage
-# (FailedPrecondition) rather than mount the dataroom with the driver's cluster-wide identity. It
+# (FailedPrecondition) rather than mount the storage space with the driver's cluster-wide identity. It
 # also needs pvcName and pvcNamespace: the identity is checked against the claim's namespace.
-# The tenant's machine needs access to the dataroom (an admin adds it in Retyc).
+# The tenant's machine needs access to the storage space (an admin adds it in Retyc).
 #
 # Static PVs are never deleted by the provisioner (no provisioned-by annotation), so
 # reclaimPolicy: Retain is the honest value here — Delete would leave a Released PV with a
-# dataroom nobody removes.
+# storage space nobody removes.
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -29,7 +29,7 @@ spec:
   storageClassName: retycfs-rwx-retain
   csi:
     driver: csi.retycfs.com
-    volumeHandle: REPLACE-WITH-DATAROOM-ID        # e.g. 01a06bd5-45b6-7489-bc18-04990d98b0c2
+    volumeHandle: REPLACE-WITH-SPACE-ID        # e.g. 01a06bd5-45b6-7489-bc18-04990d98b0c2
     volumeAttributes:
       csi.retycfs.com/uid: "1000"                   # owner of the files: the UID the consumer pods run as
       # csi.retycfs.com/gid: "1000"                 # optional, defaults to the UID
@@ -49,7 +49,7 @@ metadata:
 spec:
   accessModes: [ReadWriteMany]
   storageClassName: retycfs-rwx-retain
-  volumeName: retycfs-adopted      # pin to the PV above instead of provisioning a new dataroom
+  volumeName: retycfs-adopted      # pin to the PV above instead of provisioning a new storage space
   resources:
     requests:
       storage: 1Gi

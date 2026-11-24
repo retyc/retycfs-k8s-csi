@@ -72,8 +72,8 @@ func TestCreateVolume_InitialMembers(t *testing.T) {
 	s.members.Wait()
 	calls := f.calls()
 	want := []string{
-		"default dataroom user add --role admin -- dr-new alice@acme.fr",
-		"default dataroom user add --role viewer -- dr-new bob@acme.fr",
+		"default space user add --role admin -- dr-new alice@acme.fr",
+		"default space user add --role viewer -- dr-new bob@acme.fr",
 	}
 	if len(calls) != 5 || strings.Join(calls[3:], "|") != strings.Join(want, "|") {
 		t.Fatalf("calls = %q", calls)
@@ -82,7 +82,7 @@ func TestCreateVolume_InitialMembers(t *testing.T) {
 		t.Fatalf("events = %q, want none", evs)
 	}
 
-	// A retry finding the dataroom does not add them again, and says so.
+	// A retry finding the space does not add them again, and says so.
 	f.set("ls.json", `{"items":[{"id":"dr-new","title":"pvc-1"}],"total":1,"page":1,"pages":1}`)
 	if _, err := s.CreateVolume(context.Background(), createRequest()); err != nil {
 		t.Fatal(err)
@@ -119,7 +119,7 @@ func TestCreateVolume_InitialMembersFailure(t *testing.T) {
 		t.Fatalf("events = %q", evs)
 	}
 
-	// No annotation: no member, and the warning that only the machine can transfer the dataroom.
+	// No annotation: no member, and the warning that only the machine can transfer the space.
 	f = newFakeRetyc(t)
 	s = f.controller(claim(map[string]string{AnnotationUID: "1000"}))
 	if _, err := s.CreateVolume(context.Background(), createRequest()); err != nil {

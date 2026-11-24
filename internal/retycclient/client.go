@@ -1,5 +1,5 @@
 // Package retycclient wraps the `retyc` CLI binary as the CSI driver's only way to talk to the
-// Retyc API. Dataroom creation is entangled with the CLI's AGE key/crypto stack (GetActiveKey,
+// Retyc API. Storage space creation is entangled with the CLI's AGE key/crypto stack (GetActiveKey,
 // rekeys) — that logic lives in retyc-cli's internal/service package, which this
 // module cannot import (Go internal-package visibility), and is not something to reimplement
 // against the raw HTTP API. Every call passes --json; retyc-cli prints a stable typed JSON
@@ -250,7 +250,7 @@ func IsConfig(err error) bool { return errors.Is(err, ErrConfig) }
 // IsConflict reports whether the API answered 409 (conflict). Kind only.
 func IsConflict(err error) bool { return hasKind(err, KindConflict) }
 
-// IsForbidden reports whether the API answered 403 (a viewer, a dataroom over its plan). Kind only.
+// IsForbidden reports whether the API answered 403 (a viewer, a storage space over its plan). Kind only.
 func IsForbidden(err error) bool { return hasKind(err, KindForbidden) }
 
 // IsRateLimited reports whether the API's rate limit held after the CLI's own retries. Kind only.
@@ -444,20 +444,20 @@ func (c *Client) environ() ([]string, func(), error) {
 	return append(env, identity.MachineDirKey+"="+dir), cleanup, nil
 }
 
-// DataroomCreateResult mirrors retyc's dataroomCreateJSON (cmd/dataroom.go).
-type DataroomCreateResult struct {
+// SpaceCreateResult mirrors retyc's dataroomCreateJSON (cmd/dataroom.go).
+type SpaceCreateResult struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
 }
 
-// CreateDataroom creates a new dataroom titled title (the CSI volume name, always unique). A
+// CreateSpace creates a new storage space titled title (the CSI volume name, always unique). A
 // non-nil capacity reserves that many bytes on the owner's plan (--storage-capacity); a non-nil
 // versioning sets --versioning=true|false. Nil leaves the CLI's default.
-func (c *Client) CreateDataroom(
+func (c *Client) CreateSpace(
 	ctx context.Context, title string, capacity *int64, versioning *bool,
-) (*DataroomCreateResult, error) {
-	args := append([]string{"dataroom", "create", "--title", title}, settingArgs(capacity, versioning)...)
-	var result DataroomCreateResult
+) (*SpaceCreateResult, error) {
+	args := append([]string{"space", "create", "--title", title}, settingArgs(capacity, versioning)...)
+	var result SpaceCreateResult
 	if err := c.run(ctx, &result, args...); err != nil {
 		return nil, err
 	}
@@ -465,23 +465,23 @@ func (c *Client) CreateDataroom(
 	return &result, nil
 }
 
-// UpdateDataroom changes the storage reservation and/or the versioning of dataroom id through
-// `dataroom set`; only the non-nil settings are sent, and with both nil nothing runs. -y is
+// UpdateSpace changes the storage reservation and/or the versioning of storage space id through
+// `space set`; only the non-nil settings are sent, and with both nil nothing runs. -y is
 // mandatory alongside --json: disabling versioning asks for a confirmation the CLI refuses to
 // prompt for with --json. The reservation can only be enlarged: the API refuses a shrink
 // (capacity_shrink) and accepts the current value without effect.
-func (c *Client) UpdateDataroom(ctx context.Context, id string, capacity *int64, versioning *bool) error {
+func (c *Client) UpdateSpace(ctx context.Context, id string, capacity *int64, versioning *bool) error {
 	settings := settingArgs(capacity, versioning)
 	if len(settings) == 0 {
 		return nil
 	}
-	args := append([]string{"dataroom", "set", "retyc://" + id}, settings...)
+	args := append([]string{"space", "set", "retyc://" + id}, settings...)
 
 	// The JSON printed on success is not needed: the change either applied or failed.
 	return c.run(ctx, nil, append(args, "-y")...)
 }
 
-// settingArgs renders the optional dataroom settings shared by `dataroom create` and `dataroom set`.
+// settingArgs renders the optional storage space settings shared by `space create` and `space set`.
 func settingArgs(capacity *int64, versioning *bool) []string {
 	var args []string
 	if capacity != nil {
@@ -514,63 +514,65 @@ func FormatSize(bytes int64) string {
 	return strconv.FormatInt(bytes, 10) + "B"
 }
 
-// DataroomDeleteResult mirrors the anonymous JSON struct returned by `dataroom rm` on a root URI.
-type DataroomDeleteResult struct {
-	DataroomID   string `json:"dataroom_id"`
+// SpaceDeleteResult mirrors the anonymous JSON struct returned by `space rm` on a root URI. The CLI
+// keeps the JSON key dataroom_id.
+type SpaceDeleteResult struct {
+	SpaceID      string `json:"dataroom_id"`
 	URI          string `json:"uri"`
 	DeletedCount int    `json:"deleted_count"`
 }
 
-// DeleteDataroom deletes the whole dataroom (root URI) identified by id. -y is mandatory
+// DeleteSpace deletes the whole storage space (root URI) identified by id. -y is mandatory
 // alongside --json: retyc's confirm() refuses to prompt interactively when --json is set.
-func (c *Client) DeleteDataroom(ctx context.Context, id string) (*DataroomDeleteResult, error) {
-	var result DataroomDeleteResult
+func (c *Client) DeleteSpace(ctx context.Context, id string) (*SpaceDeleteResult, error) {
+	var result SpaceDeleteResult
 	uri := "retyc://" + id
-	if err := c.run(ctx, &result, "dataroom", "rm", uri, "-y"); err != nil {
+	if err := c.run(ctx, &result, "space", "rm", uri, "-y"); err != nil {
 		return nil, err
 	}
 
 	return &result, nil
 }
 
-// Dataroom mirrors internal/api.Dataroom (only the fields this driver needs).
-type Dataroom struct {
+// Space mirrors internal/api.Dataroom (only the fields this driver needs).
+type Space struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`
 	CreatedAt time.Time `json:"created_at"`
-	// StorageCapacity is the reserved capacity in bytes; nil when the dataroom is bounded by the
+	// StorageCapacity is the reserved capacity in bytes; nil when the storage space is bounded by the
 	// owner's plan instead (no reservation).
 	StorageCapacity *int64 `json:"storage_capacity,omitempty"`
 	// VersioningEnabled is nil when the API predates the setting (versioning on).
 	VersioningEnabled *bool `json:"versioning_enabled,omitempty"`
 }
 
-// DataroomList is the result of ListDatarooms.
-type DataroomList struct {
-	Items []Dataroom
+// SpaceList is the result of ListSpaces.
+type SpaceList struct {
+	Items []Space
 }
 
-// dataroomPage mirrors retyc's pagedJSON[api.Dataroom].
-type dataroomPage struct {
-	Items []Dataroom `json:"items"`
-	Total int        `json:"total"`
-	Page  int        `json:"page"`
-	Pages int        `json:"pages"`
+// spacePage mirrors retyc's pagedJSON[api.Dataroom].
+type spacePage struct {
+	Items []Space `json:"items"`
+	Total int     `json:"total"`
+	Page  int     `json:"page"`
+	Pages int     `json:"pages"`
 }
 
-// ListDatarooms returns every dataroom visible to the authenticated identity: `retyc dataroom
-// ls` walks all the pages itself and prints them as one list.
-func (c *Client) ListDatarooms(ctx context.Context) (*DataroomList, error) {
-	var page dataroomPage
-	if err := c.run(ctx, &page, "dataroom", "ls"); err != nil {
+// ListSpaces returns every storage space visible to the authenticated identity: `retyc space ls`
+// walks all the pages itself and prints them as one list.
+func (c *Client) ListSpaces(ctx context.Context) (*SpaceList, error) {
+	var page spacePage
+	if err := c.run(ctx, &page, "space", "ls"); err != nil {
 		return nil, err
 	}
 
-	return &DataroomList{Items: page.Items}, nil
+	return &SpaceList{Items: page.Items}, nil
 }
 
-// UserQuota mirrors internal/api.UserQuota. Nil MaxCountDataroom/MaxCountShare means unlimited.
-// There is no per-dataroom size cap in the API — only these account-wide totals.
+// UserQuota mirrors internal/api.UserQuota, whose field names follow the API (count_dataroom: the
+// storage spaces). Nil MaxCountDataroom/MaxCountShare means unlimited. There is no per-space size
+// cap in the API — only these account-wide totals.
 type UserQuota struct {
 	CountShare       int   `json:"count_share"`
 	MaxCountShare    *int  `json:"max_count_share"`
@@ -591,8 +593,8 @@ func (c *Client) Quota(ctx context.Context) (*UserQuota, error) {
 	return &q, nil
 }
 
-// HasDataroomQuota reports whether one more dataroom can be created.
-func (q *UserQuota) HasDataroomQuota() bool {
+// HasSpaceQuota reports whether one more storage space can be created.
+func (q *UserQuota) HasSpaceQuota() bool {
 	return q.MaxCountDataroom == nil || q.CountDataroom < *q.MaxCountDataroom
 }
 
@@ -625,17 +627,17 @@ func (c *Client) AuthStatusCheck(ctx context.Context) error {
 	return nil
 }
 
-// Roles of a dataroom member (`dataroom user add --role`).
+// Roles of a storage space member (`space user add --role`).
 const (
 	RoleViewer = "viewer"
 	RoleEditor = "editor"
 	RoleAdmin  = "admin"
 )
 
-// AddMember adds email to dataroom id with role, and rekeys the dataroom for it. The positional
+// AddMember adds email to storage space id with role, and rekeys the space for it. The positional
 // arguments follow "--", so that an e-mail starting with "-" is never taken for a flag.
-func (c *Client) AddMember(ctx context.Context, dataroomID, email, role string) error {
-	return c.run(ctx, nil, "dataroom", "user", "add", "--role", role, "--", dataroomID, email)
+func (c *Client) AddMember(ctx context.Context, spaceID, email, role string) error {
+	return c.run(ctx, nil, "space", "user", "add", "--role", role, "--", spaceID, email)
 }
 
 // Events of `machine enroll --json`, one JSON object per line on stdout.

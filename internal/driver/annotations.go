@@ -39,13 +39,13 @@ const (
 	AnnotationMountMemoryRequest = "csi.retycfs.com/mount-memory-request"
 	AnnotationMountMemoryLimit   = "csi.retycfs.com/mount-memory-limit"
 
-	// AnnotationInitialMembers lists the people CreateVolume adds to the dataroom it creates:
+	// AnnotationInitialMembers lists the people CreateVolume adds to the storage space it creates:
 	// "alice@acme.fr:admin,bob@acme.fr:editor,carol@acme.fr", role admin, editor or viewer (the
 	// default). Read at creation only: changing it later changes nothing.
 	AnnotationInitialMembers = "csi.retycfs.com/initial-members"
 )
 
-// Roles of an initial member, as `retyc dataroom user add --role` takes them.
+// Roles of an initial member, as `retyc space user add --role` takes them.
 const (
 	roleAdmin  = "admin"
 	roleEditor = "editor"
