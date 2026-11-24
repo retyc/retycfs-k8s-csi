@@ -1016,15 +1016,15 @@ func TestLostWrites(t *testing.T) {
 		{"75 never ready", exited(ExitWritesLost, corev1.ConditionFalse, created, ""), true, "writes lost"},
 		{"never ready", exited(ExitFailed, corev1.ConditionFalse, created, "Error: redis: connection refused"), false,
 			"failed before it was ready"},
-		// A newer CLI exits 75 on lost writes: a 1 after serving with no loss reported lost nothing.
+		// The CLI exits 75 on lost writes: a 1 after serving with no loss reported lost nothing.
 		{"ready then exited", exited(ExitFailed, corev1.ConditionFalse, later, "Error: something"), false,
 			"failed after it was ready"},
-		// A CLI older than 75: its words.
+		// A 1 whose output reports a loss all the same: its words.
 		{"loss reported", exited(ExitFailed, corev1.ConditionFalse, created, lost), true, "writes lost"},
 		{"loss reported after serving", exited(ExitFailed, corev1.ConditionFalse, later, lost), true, "writes lost"},
 		{"drain log", exited(ExitFailed, corev1.ConditionFalse, later, "drain over after 5m0s: 3 files not sent"), true,
 			"writes lost"},
-		// A newer CLI whose drain ran out before it counted the cancelled uploads (seen in e2e).
+		// A drain that ran out before the CLI counted the cancelled uploads (seen in e2e).
 		{"drain timeout over", exited(ExitFailed, corev1.ConditionFalse, later, "stopping: the drain timeout is over: "+
 			"the uploads still in progress are cancelled, what they held is lost"), true, "writes lost"},
 		{"everything sent", exited(ExitFailed, corev1.ConditionFalse, later, "drain over after 1s: everything was sent"),

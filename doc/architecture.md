@@ -259,11 +259,11 @@ forever. The backoff lives in the node plugin's memory: a restart of the plugin 
 
 A pod that left no exit code (evicted, lost with its node) counts as `-1`.
 
-`75` comes with retyc-cli v1.5.0-beta1. An older CLI (a development image before it) exits `1` on lost writes as on any
-other error, with the same message (`N files being written were not sent before the filesystem was unmounted...`): an
-exit `1` whose output (the termination message) holds those words, or the drain's `abandoned (no drain timeout)` and
-`drain over after ...: ... not sent`, is read as lost writes. A newer CLI never exits `1` on lost writes, so the
-fallback holds for both; whether the pod was ever ready only changes the wording of `MountFailed`.
+The CLI exits `75` on lost writes, with two exceptions the driver reads in the output (the termination message): a
+login lost at the same time keeps `77`, and a drain that ran out before the cancelled uploads were counted exits `1`.
+On those two codes, the CLI's words (`N files being written were not sent before the filesystem was unmounted...`, the
+drain's `abandoned (no drain timeout)`, `drain over after ...: ... not sent` and `what they held is lost`) are read as
+lost writes. Whether the pod was ever ready only changes the wording of `MountFailed`.
 
 ## Recovery
 

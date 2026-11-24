@@ -48,12 +48,11 @@ var lostWritesText = []string{
 }
 
 // LostWrites says whether a mount pod lost writes: it exited with ExitWritesLost or, without a
-// code that says so, its termination message reports a loss in the CLI's words (the error it exits
-// with, unchanged since: "N files being written were not sent before the filesystem was
-// unmounted..."). The words are read on two codes only: ExitFailed, for a CLI older than
-// ExitWritesLost, or a newer one whose drain ran out before it counted the cancelled uploads (it
-// then exits 1 after logging that they are lost), and ExitAuthRequired, which a login lost at the
-// same time keeps.
+// code that says so, its termination message reports a loss in the CLI's words ("N files being
+// written were not sent before the filesystem was unmounted...", or the log of its drain). The
+// words are read on two codes only: ExitFailed, for a CLI whose drain ran out before it counted the
+// cancelled uploads (it then exits 1 after logging that they are lost), and ExitAuthRequired, which
+// a login lost at the same time keeps.
 func LostWrites(st State) bool {
 	if st.ExitCode == nil {
 		return false
@@ -79,8 +78,8 @@ func lostWritesReported(message string) bool {
 	return strings.Contains(message, "drain over after") && strings.Contains(message, " not sent")
 }
 
-// ExitLabel is ExitMeaning of a pod that has exited, with an exit 1 told apart by LostWrites (an
-// older CLI) and by whether the pod was ever ready: "writes lost" when it reports a loss, a failure
+// ExitLabel is ExitMeaning of a pod that has exited, with an exit 1 told apart by LostWrites (a
+// drain cut short) and by whether the pod was ever ready: "writes lost" when it reports a loss, a failure
 // at start when it never served, a plain failure otherwise. A 77 that lost writes says both.
 func ExitLabel(st State) string {
 	if st.ExitCode == nil {
