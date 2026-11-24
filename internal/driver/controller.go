@@ -573,7 +573,7 @@ func updateError(id string, err error) error {
 }
 
 // apiError maps a failure of the CLI to a CSI status, prefixed with what was being done, from the
-// error's kind (or its text, with a CLI older than the kinds: see retycclient):
+// error's kind (see retycclient):
 //   - no storage left (plan_exceeded, storage_exceeded): ResourceExhausted;
 //   - a reservation that cannot be shrunk or is below the minimum: OutOfRange;
 //   - any other validation error (invalid): InvalidArgument;

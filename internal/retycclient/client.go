@@ -4,9 +4,9 @@
 // module cannot import (Go internal-package visibility), and is not something to reimplement
 // against the raw HTTP API. Every call passes --json; retyc-cli prints a stable typed JSON
 // payload on stdout on success and a JSON error object on stderr on failure (non-zero exit):
-// {"error": "...", "kind": "...", "status": 400, "detail": "..."} since retyc-cli 17e7230, only
-// {"error": "..."} before it. The kind is what this package branches on; an older CLI falls back
-// to the text of the error.
+// {"error": "...", "kind": "...", "status": 400, "detail": "..."}. The kind is what this package
+// branches on, never the text of the error. The driver needs retyc-cli v1.7.0-rc1 or later (the
+// `space` commands).
 package retycclient
 
 import (
@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -67,10 +66,9 @@ type Error struct {
 	Args    []string
 	Message string
 	// Kind is the CLI's stable classification of the error (the Kind* constants), "" when stderr
-	// carried none: a CLI older than the structured errors, or no JSON at all. The Is* predicates
-	// branch on it first and fall back to the text of Message only when it is empty.
+	// carried no JSON at all. The Is* predicates branch on it, never on the text of Message.
 	Kind string
-	// Status is the HTTP status of an API refusal, 0 for any other error or an older CLI.
+	// Status is the HTTP status of an API refusal, 0 for any other error.
 	Status int
 	// Detail is the API's own wording of a refusal: informative only, it may change.
 	Detail string
@@ -147,97 +145,32 @@ const (
 	KindEnrollmentDenied  = "enrollment_denied"
 )
 
-// classify returns the kind of a CLI error and its lowercased message, false when err is not one.
-// The kind is "" when the CLI gave none: the caller then reads the message.
-func classify(err error) (kind, msg string, ok bool) {
-	var e *Error
-	if !errors.As(err, &e) {
-		return "", "", false
-	}
-
-	return e.Kind, strings.ToLower(e.Message), true
-}
-
-// hasKind reports whether err is a CLI error of one of kinds. It never matches an error without a
-// kind: the predicates that have a text fallback use classify.
+// hasKind reports whether err is a CLI error of one of kinds.
 func hasKind(err error, kinds ...string) bool {
-	kind, _, ok := classify(err)
+	var e *Error
 
-	return ok && kind != "" && slices.Contains(kinds, kind)
+	return errors.As(err, &e) && slices.Contains(kinds, e.Kind)
 }
 
 // IsStorageExhausted reports whether err is a refusal for lack of storage: a reservation the
 // owner's plan cannot hold (plan_exceeded) or, by prudence, a write refused for lack of storage
-// (storage_exceeded). Without a kind, the API's text (`API error 400: {"detail":"Not enough storage
-// left on your plan"}`).
-func IsStorageExhausted(err error) bool {
-	kind, msg, ok := classify(err)
-	if kind != "" {
-		return kind == KindPlanExceeded || kind == KindStorageExceeded
-	}
-
-	return ok && strings.Contains(msg, "not enough storage left")
-}
-
-// The text fallbacks, for a CLI that predates the kinds (the pinned image may be one): they follow
-// the wording the CLI relays from the API.
-var (
-	// validationError is the start of the message of a 422, at its beginning or after a prefix of the
-	// CLI's ("creating dataroom: API error 422: ..."), not anywhere in the text.
-	validationError = regexp.MustCompile(`(^|: )api error 422:`)
-	// notFoundError is the start of the message of a 404, anchored the same way: a "not found" or a
-	// "404" elsewhere in the text (a 500 relaying a backend's 404, a title) is no missing resource.
-	notFoundError = regexp.MustCompile(`(^|: )api error 404:`)
-	// minimumCapacity is the API's refusal of a reservation below its minimum.
-	minimumCapacity = regexp.MustCompile(`must be at least \d+ bytes`)
-)
+// (storage_exceeded).
+func IsStorageExhausted(err error) bool { return hasKind(err, KindPlanExceeded, KindStorageExceeded) }
 
 // IsValidation reports whether err is the API's validation refusing the request: kind invalid (a
-// 400 or 422 the CLI does not classify further). Without a kind, any 422.
-func IsValidation(err error) bool {
-	kind, msg, ok := classify(err)
-	if kind != "" {
-		return kind == KindInvalid
-	}
-
-	return ok && validationError.MatchString(msg)
-}
+// 400 or 422 the CLI does not classify further).
+func IsValidation(err error) bool { return hasKind(err, KindInvalid) }
 
 // IsCapacityRefused reports whether err is a reservation below the API's minimum
-// (capacity_too_small). Without a kind, a 422 naming the storage_capacity field or the minimum
-// ("must be at least 21474836480 bytes").
-func IsCapacityRefused(err error) bool {
-	kind, msg, ok := classify(err)
-	if kind != "" {
-		return kind == KindCapacityTooSmall
-	}
-
-	return ok && validationError.MatchString(msg) &&
-		(strings.Contains(msg, "storage_capacity") || minimumCapacity.MatchString(msg))
-}
+// (capacity_too_small).
+func IsCapacityRefused(err error) bool { return hasKind(err, KindCapacityTooSmall) }
 
 // IsNotEnlarged reports whether err is the API's refusal to shrink a storage reservation
-// (capacity_shrink). Without a kind, its text ("... can only be enlarged").
-func IsNotEnlarged(err error) bool {
-	kind, msg, ok := classify(err)
-	if kind != "" {
-		return kind == KindCapacityShrink
-	}
+// (capacity_shrink).
+func IsNotEnlarged(err error) bool { return hasKind(err, KindCapacityShrink) }
 
-	return ok && strings.Contains(msg, "can only be enlarged")
-}
-
-// IsNotFound reports whether err is a missing resource, the API's 404 (not_found). Without a kind,
-// the 404 the CLI relays (`deleting dataroom: API error 404: {"detail":"Dataroom not found"}`),
-// matched at the start of the message or after a prefix of the CLI's (see notFoundError).
-func IsNotFound(err error) bool {
-	kind, msg, ok := classify(err)
-	if kind != "" {
-		return kind == KindNotFound || kind == KindGone
-	}
-
-	return ok && notFoundError.MatchString(msg)
-}
+// IsNotFound reports whether err is a missing resource, the API's 404 or 410 (not_found, gone).
+func IsNotFound(err error) bool { return hasKind(err, KindNotFound, KindGone) }
 
 // IsMachineRefused reports whether the machine account is refused, disabled or deleted (exit code
 // 77): see ErrMachineRefused.
@@ -247,21 +180,19 @@ func IsMachineRefused(err error) bool { return errors.Is(err, ErrMachineRefused)
 // ErrConfig.
 func IsConfig(err error) bool { return errors.Is(err, ErrConfig) }
 
-// IsConflict reports whether the API answered 409 (conflict). Kind only.
+// IsConflict reports whether the API answered 409 (conflict).
 func IsConflict(err error) bool { return hasKind(err, KindConflict) }
 
-// IsForbidden reports whether the API answered 403 (a viewer, a storage space over its plan). Kind only.
+// IsForbidden reports whether the API answered 403 (a viewer, a storage space over its plan).
 func IsForbidden(err error) bool { return hasKind(err, KindForbidden) }
 
-// IsRateLimited reports whether the API's rate limit held after the CLI's own retries. Kind only.
+// IsRateLimited reports whether the API's rate limit held after the CLI's own retries.
 func IsRateLimited(err error) bool { return hasKind(err, KindRateLimited) }
 
 // IsCLITooOld reports whether the API refused this CLI as older than the minimum it accepts (426).
-// Kind only.
 func IsCLITooOld(err error) bool { return hasKind(err, KindCLITooOld) }
 
-// stderrError is the JSON object retyc prints on stderr with --json. An older CLI prints only
-// "error"; the other fields are then zero.
+// stderrError is the JSON object retyc prints on stderr with --json.
 type stderrError struct {
 	Error  string `json:"error"`
 	Kind   string `json:"kind"`
@@ -269,12 +200,11 @@ type stderrError struct {
 	Detail string `json:"detail"`
 }
 
-// parseStderrError extracts the JSON error object from stderr. The CLI's spinner writes ANSI escape
-// sequences to stderr even without a TTY (verified: `\r\x1b[K\x1b[36m⠋...` precedes the JSON on the
-// same line), so a plain Unmarshal of the whole buffer fails — locate the JSON object instead of
-// assuming stderr is clean. Without one, Error is the cleaned stderr text and the rest is zero.
+// parseStderrError extracts the JSON error object from stderr. The CLI's contract: the error object
+// is the last line of stderr, after any text warnings. Should something follow it all the same, the
+// object is searched for in the whole of stderr. Without one (a crash, a CLI killed at its timeout),
+// Error is the cleaned stderr text and the rest is zero.
 func parseStderrError(stderr []byte) stderrError {
-	// The CLI's contract: the error object is the last line of stderr, after any text warnings.
 	lines := bytes.Split(bytes.TrimSpace(stderr), []byte("\n"))
 	if last := bytes.TrimSpace(lines[len(lines)-1]); len(last) > 0 && last[0] == '{' {
 		var payload stderrError
@@ -282,12 +212,11 @@ func parseStderrError(stderr []byte) stderrError {
 			return payload
 		}
 	}
-	// Older CLIs: the spinner's escape sequences may precede the object on its line.
-	// Try every '{' from the first one on: the payload's own message may embed JSON (the API
-	// error body, e.g. {"detail":"Dataroom not found"}), so the *last* '{' is usually wrong,
-	// and the escape noise never contains '{' so the first candidate is normally right.
+	// Not the last line: try every '{' from the first one on. The payload's own message may embed
+	// JSON (the API error body, e.g. {"detail":"Dataroom not found"}), so the *last* '{' is usually
+	// wrong.
 	for idx := bytes.IndexByte(stderr, '{'); idx >= 0; {
-		// Decode stops after the first value: whatever the CLI may write after the object is ignored.
+		// Decode stops after the first value: whatever follows the object is ignored.
 		var payload stderrError
 		if err := json.NewDecoder(bytes.NewReader(stderr[idx:])).Decode(&payload); err == nil && payload.Error != "" {
 			return payload

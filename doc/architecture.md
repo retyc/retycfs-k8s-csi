@@ -167,15 +167,12 @@ deletes its older versions.
 
 The provisioner and the resizer retry with their own backoff, and record the message as an event on the claim.
 
-The CLI's failures are told apart by the `kind` of the JSON error it prints on stderr under `--json` (retyc-cli
-v1.5.0-beta1 on: `{"error", "kind", "status", "code", "detail"}`, kinds in brackets above); `detail`, the API's wording,
-is only carried in the message. A machine refused is `FailedPrecondition` rather than `Unauthenticated`: in gRPC the
+The CLI's failures are told apart by the `kind` of the JSON error it prints on stderr under `--json`
+(`{"error", "kind", "status", "code", "detail"}`, kinds in brackets above); `detail`, the API's wording, is only
+carried in the message, and the driver never reads the text of an error. A machine refused is `FailedPrecondition` rather than `Unauthenticated`: in gRPC the
 latter says that the RPC's caller (the sidecar) is not authenticated, while here it is the identity of the secrets that
-the Retyc API refuses, and its reactivation (or a new machine) is what it waits for. An older CLI prints only
-`{"error": "..."}`: the driver
-then falls back to the text the CLI relays from the API (`API error 404:`, `API error 422:`, `Not enough storage left`,
-`can only be enlarged`, `must be at least N bytes`), and the login, configuration, 403, rate limit and version refusals
-stay `Internal`.
+the Retyc API refuses, and its reactivation (or a new machine) is what it waits for. The driver needs retyc-cli
+v1.7.0-rc1 or later (the `space` commands).
 
 `ControllerExpandVolume` reads the storage space's reservation before `space set`: the API accepts the current value
 without effect, but refuses a smaller one, and a reservation already at or above the request (enlarged elsewhere, or

@@ -320,7 +320,7 @@ func TestCreateVolume_QuotaAndCLIErrors(t *testing.T) {
 	wantCode(t, err, codes.ResourceExhausted)
 
 	f = newFakeRetyc(t)
-	f.set("create.err", `{"error":"API error 403: plan storage exceeded"}`)
+	f.set("create.err", `{"error":"API error 500: plan storage exceeded","kind":"api_error","status":500}`)
 	_, err = f.controller(ok).CreateVolume(context.Background(), createRequest())
 	wantCode(t, err, codes.Internal)
 	if !strings.Contains(err.Error(), "plan storage exceeded") {
@@ -328,18 +328,23 @@ func TestCreateVolume_QuotaAndCLIErrors(t *testing.T) {
 	}
 
 	f = newFakeRetyc(t)
-	f.set("ls.err", `{"error":"not authenticated"}`)
+	f.set("ls.err", `{"error":"listing storage spaces: boom","kind":"error"}`)
 	_, err = f.controller(ok).CreateVolume(context.Background(), createRequest())
 	wantCode(t, err, codes.Internal)
 
 	// The API's refusals of a reservation.
-	for msg, code := range map[string]codes.Code{
-		`API error 400: {\"detail\":\"Not enough storage left on your plan\"}`:                codes.ResourceExhausted,
-		`API error 422: {\"detail\":\"storage_capacity must be at least 21474836480 bytes\"}`: codes.OutOfRange,
-		`API error 422: {\"detail\":\"title: field required\"}`:                               codes.InvalidArgument,
+	for _, tc := range []struct {
+		msg, kind string
+		code      codes.Code
+	}{
+		{`API error 400: {\"detail\":\"Not enough storage left on your plan\"}`, "plan_exceeded", codes.ResourceExhausted},
+		{`API error 422: {\"detail\":\"storage_capacity must be at least 21474836480 bytes\"}`, "capacity_too_small",
+			codes.OutOfRange},
+		{`API error 422: {\"detail\":\"title: field required\"}`, "invalid", codes.InvalidArgument},
 	} {
+		code := tc.code
 		f = newFakeRetyc(t)
-		f.set("create.err", `{"error":"`+msg+`"}`)
+		f.set("create.err", `{"error":"`+tc.msg+`","kind":"`+tc.kind+`"}`)
 		_, err = f.controller(ok).CreateVolume(context.Background(), createRequest())
 		wantCode(t, err, code)
 		if !strings.Contains(err.Error(), "API error") {
@@ -405,27 +410,28 @@ func TestControllerExpandVolume(t *testing.T) {
 	_, err = s.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{VolumeId: "dr-1"})
 	wantCode(t, err, codes.InvalidArgument)
 
-	f.set("set.err", `{"error":"API error 400: a storage reservation can only be enlarged"}`)
+	f.set("set.err", `{"error":"API error 400: a storage reservation can only be enlarged",`+
+		`"kind":"capacity_shrink","status":400}`)
 	_, err = s.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
 		VolumeId: "dr-1", CapacityRange: &csi.CapacityRange{RequiredBytes: 1 << 30},
 	})
 	wantCode(t, err, codes.OutOfRange)
 
-	f.set("set.err", `{"error":"API error 404: {\"detail\":\"Dataroom not found\"}"}`)
+	f.set("set.err", `{"error":"API error 404: {\"detail\":\"Dataroom not found\"}","kind":"not_found","status":404}`)
 	_, err = s.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
 		VolumeId: "dr-404", CapacityRange: &csi.CapacityRange{RequiredBytes: 1 << 30},
 	})
 	wantCode(t, err, codes.NotFound)
 
-	f.set("set.err", `{"error":"API error 400: {\"detail\":\"Not enough storage left on your plan\"}"}`)
+	f.set("set.err", `{"error":"API error 400: {\"detail\":\"Not enough storage left on your plan\"}",`+
+		`"kind":"plan_exceeded","status":400}`)
 	_, err = s.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
 		VolumeId: "dr-1", CapacityRange: &csi.CapacityRange{RequiredBytes: 1 << 40},
 	})
 	wantCode(t, err, codes.ResourceExhausted)
 }
 
-// The kinds of a CLI with structured errors decide the code, whatever the text says; without a kind
-// (an older CLI), the text does (see TestCreateVolume_QuotaAndCLIErrors).
+// The kinds of the CLI's errors decide the code, whatever the text says.
 func TestCLIErrorKinds(t *testing.T) {
 	ok := claim(map[string]string{AnnotationUID: "1000"})
 	stderr := func(kind string) string {
@@ -611,7 +617,7 @@ func TestControllerModifyVolume(t *testing.T) {
 	})
 	wantCode(t, err, codes.InvalidArgument)
 
-	f.set("set.err", `{"error":"API error 500: boom"}`)
+	f.set("set.err", `{"error":"API error 500: boom","kind":"api_error","status":500}`)
 	_, err = s.ControllerModifyVolume(ctx, &csi.ControllerModifyVolumeRequest{
 		VolumeId: "dr-1", MutableParameters: map[string]string{versioningParameter: "true"},
 	})

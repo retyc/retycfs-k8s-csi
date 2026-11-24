@@ -13,95 +13,20 @@ import (
 	"github.com/retyc/retycfs-k8s-csi/internal/identity"
 )
 
-// Real stderr captured from `retyc --json dataroom rm retyc://0000... -y` on 2026-09-03, a CLI older
-// than the structured errors and the rename to storage spaces: the spinner's ANSI escapes precede
-// the JSON payload on the same line.
-const realStderr = "\r\x1b[K\x1b[36m⠋\x1b[0m\r\x1b[K\x1b[0m" +
-	`{"error":"deleting dataroom: API error 404: {\"detail\":\"Dataroom not found\"}"}` + "\n"
-
-func TestParseStderrError_SkipsSpinnerNoise(t *testing.T) {
-	got := parseStderrError([]byte(realStderr)).Error
-	want := `deleting dataroom: API error 404: {"detail":"Dataroom not found"}`
-	if got != want {
-		t.Fatalf("parseStderrError:\n got %q\nwant %q", got, want)
-	}
-}
-
 func TestParseStderrError_NonJSONFallsBackToCleanText(t *testing.T) {
-	got := parseStderrError([]byte("\r\x1b[K\x1b[36m⠋\x1b[0mpanic: something broke\n")).Error
+	got := parseStderrError([]byte("\r\x1b[K\x1b[36m⠋\x1b[0mpanic: something broke\n"))
 	// Escape sequences and \r are gone; the spinner's braille glyph is plain text and may stay.
-	if !strings.Contains(got, "panic: something broke") || strings.ContainsAny(got, "\x1b\r") {
-		t.Fatalf("got %q", got)
+	if !strings.Contains(got.Error, "panic: something broke") || strings.ContainsAny(got.Error, "\x1b\r") {
+		t.Fatalf("got %q", got.Error)
+	}
+	if got.Kind != "" || got.Status != 0 || got.Detail != "" {
+		t.Fatalf("no JSON object: %+v", got)
 	}
 }
 
-func TestIsNotFound(t *testing.T) {
-	err := &Error{Args: []string{"space", "rm"}, Message: parseStderrError([]byte(realStderr)).Error}
-	if !IsNotFound(err) {
-		t.Fatalf("expected IsNotFound for %v", err)
-	}
-	if IsNotFound(&Error{Message: "API error 500: boom"}) {
-		t.Fatal("500 must not be treated as not-found")
-	}
-	if IsNotFound(errors.New("API error 404: not a retyc error")) {
-		t.Fatal("plain errors must not match")
-	}
-	for _, msg := range []string{
-		`API error 404: {"detail":"Dataroom not found"}`,
-		`updating dataroom: API error 404: {"detail":"Dataroom not found"}`,
-	} {
-		if !IsNotFound(&Error{Message: msg}) {
-			t.Errorf("IsNotFound(%q) = false, want true", msg)
-		}
-	}
-	for _, msg := range []string{
-		// "not found" or "404" elsewhere in the text is no missing resource.
-		`API error 500: {"detail":"key not found in cache"}`,
-		`API error 500: upstream said api error 404: boom`,
-		`API error 4040: boom`,
-		`API error 422: {"detail":"title 'api error 404: x' is not allowed"}`,
-		`identity provider not found`,
-	} {
-		if IsNotFound(&Error{Message: msg}) {
-			t.Errorf("IsNotFound(%q) = true, want false", msg)
-		}
-	}
-}
-
-func TestAPIRefusals(t *testing.T) {
-	exhausted := &Error{Message: `API error 400: {"detail":"Not enough storage left on your plan"}`}
-	tooSmall := &Error{Message: `API error 422: {"detail":"storage_capacity must be at least 21474836480 bytes"}`}
-	badTitle := &Error{Message: `API error 422: {"detail":[{"loc":["body","title"],"msg":"field required"}]}`}
-	for _, tc := range []struct {
-		err                         error
-		exhausted, validation, size bool
-	}{
-		{err: exhausted, exhausted: true},
-		{err: tooSmall, validation: true, size: true},
-		{err: badTitle, validation: true},
-		{err: &Error{Message: "API error 500: boom"}},
-		{err: errors.New("API error 422: not a retyc error")},
-		// Prefixed by the CLI: still a 422.
-		{err: &Error{Message: `updating dataroom: API error 422: {"detail":"storage_capacity is too large"}`},
-			validation: true, size: true},
-		// "422" elsewhere in the text is no validation error.
-		{err: &Error{Message: `API error 500: upstream said api error 422: boom`}},
-		{err: &Error{Message: `API error 4220: boom`}},
-		// A 422 that mentions a capacity, but not the reservation.
-		{err: &Error{Message: `API error 422: {"detail":"title exceeds the capacity of the field"}`}, validation: true},
-	} {
-		if IsStorageExhausted(tc.err) != tc.exhausted || IsValidation(tc.err) != tc.validation ||
-			IsCapacityRefused(tc.err) != tc.size {
-			t.Errorf("%v: exhausted %t, validation %t, capacity %t; want %t, %t, %t", tc.err,
-				IsStorageExhausted(tc.err), IsValidation(tc.err), IsCapacityRefused(tc.err),
-				tc.exhausted, tc.validation, tc.size)
-		}
-	}
-}
-
-// Stderr of a retyc-cli with structured errors (17e7230 on): kind, status and detail beside the
-// message, after the spinner's escapes.
-const structuredStderr = "\r\x1b[K\x1b[36m⠋\x1b[0m\r\x1b[K" +
+// Stderr of the CLI on a refusal of the API: a text warning, then the error object as the last
+// line, its message embedding the API's own JSON body.
+const structuredStderr = "warning: something worth telling\n" +
 	`{"error":"updating storage space: API error 400: {\"detail\":\"A reservation can only be enlarged\"}",` +
 	`"kind":"capacity_shrink","status":400,"detail":"A reservation can only be enlarged"}` + "\n"
 
@@ -116,14 +41,10 @@ func TestParseStderrError_Structured(t *testing.T) {
 	if got != want {
 		t.Fatalf("parseStderrError:\n got %+v\nwant %+v", got, want)
 	}
-	// An older CLI: the message only.
-	if got := parseStderrError([]byte(realStderr)); got.Kind != "" || got.Status != 0 || got.Detail != "" {
-		t.Fatalf("old CLI stderr: %+v", got)
-	}
 }
 
-// TestKinds checks that the predicates branch on the kind when there is one, whatever the text says,
-// and on the text only without one.
+// TestKinds checks that the predicates branch on the kind, whatever the text says, and never on the
+// text.
 func TestKinds(t *testing.T) {
 	kinded := func(kind, msg string) error { return &Error{Kind: kind, Message: msg} }
 	type preds struct{ notFound, exhausted, capacity, shrink, validation, auth, config, rate, old, forbidden bool }
@@ -146,24 +67,26 @@ func TestKinds(t *testing.T) {
 		{kinded(KindAuthRequired, "not logged in"), preds{auth: true}},
 		{kinded(KindUnauthenticated, "API error 401: x"), preds{auth: true}},
 		{kinded(KindConfig, "machine account configuration"), preds{config: true}},
-		// Without a kind, the exit code; a denied enrollment exits 78 but is no configuration error.
+		// Without a kind (no JSON on stderr), the exit code; a denied enrollment exits 78 but is no configuration error.
 		{&Error{ExitCode: ExitMachineRefused}, preds{auth: true}},
 		{&Error{ExitCode: ExitConfig}, preds{config: true}},
 		{&Error{ExitCode: ExitConfig, Kind: KindEnrollmentDenied}, preds{}},
 		{kinded(KindRateLimited, "API error 429: x"), preds{rate: true}},
 		{kinded(KindCLITooOld, "API error 426: x"), preds{old: true}},
 		{kinded(KindForbidden, "API error 403: x"), preds{forbidden: true}},
-		// The kind wins over a text that the fallback would match.
+		// The text is never read.
 		{kinded("api_error", `API error 404: {"detail":"Not enough storage left, can only be enlarged"}`),
 			preds{}},
 		{kinded(KindInvalid, `API error 422: storage_capacity must be at least 21474836480 bytes`),
 			preds{validation: true}},
 		// An unknown kind reads as a plain error.
 		{kinded("brand_new_kind", "API error 404: x"), preds{}},
-		// Without a kind (an older CLI), the text.
-		{kinded("", `updating dataroom: API error 404: {"detail":"Dataroom not found"}`), preds{notFound: true}},
-		{kinded("", `API error 400: a storage reservation can only be enlarged`), preds{shrink: true}},
-		{kinded("", `API error 401: {"detail":"Not authenticated"}`), preds{}},
+		{kinded(KindGone, "API error 410: x"), preds{notFound: true}},
+		// Without a kind, nothing matches.
+		{kinded("", `updating storage space: API error 404: {"detail":"Dataroom not found"}`), preds{}},
+		{kinded("", `API error 400: a storage reservation can only be enlarged`), preds{}},
+		{kinded("", `API error 422: storage_capacity must be at least 21474836480 bytes`), preds{}},
+		{kinded("", `API error 400: {"detail":"Not enough storage left on your plan"}`), preds{}},
 		{errors.New("API error 404: not a retyc error"), preds{}},
 	} {
 		if got := check(tc.err); got != tc.want {
@@ -191,7 +114,7 @@ case "$2 $3" in
     elif [ -n "$RETYC_MACHINE_DIR" ]; then printf '{"authenticated":false,"reason":"machine_revoked"}\n'
     else printf '{"authenticated":false,"reason":"no_token"}\n'; fi ;;
   "space rm")
-    printf '\r\033[K{"error":"deleting storage space: API error 404: {\\"detail\\":\\"Dataroom not found\\"}",' >&2
+    printf '{"error":"deleting storage space: API error 404: {\\"detail\\":\\"Dataroom not found\\"}",' >&2
     printf '"kind":"not_found","status":404,"detail":"Dataroom not found"}\n' >&2
     exit 1 ;;
   "space set")
@@ -323,7 +246,8 @@ func TestUpdateSpace(t *testing.T) {
 }
 
 func TestUpdateSpace_CLIError(t *testing.T) {
-	c, _ := argsRecorder(t, `{"error":"API error 404: {\"detail\":\"Dataroom not found\"}"}`, 1)
+	c, _ := argsRecorder(t,
+		`{"error":"API error 404: {\"detail\":\"Dataroom not found\"}","kind":"not_found","status":404}`, 1)
 	versioning := false
 	err := c.UpdateSpace(context.Background(), "dr-404", nil, &versioning)
 	var cliErr *Error

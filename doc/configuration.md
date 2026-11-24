@@ -643,7 +643,7 @@ The `ghcr.io/retyc/retyc-cli` release embedded in the controller image is pinned
 build against another release, or the development CLI (`make image-dev`, see [testing.md](testing.md)):
 
 ```sh
-make image RETYC_CLI_VERSION=v1.5.0-beta1
+make image RETYC_CLI_VERSION=v1.7.0-rc1
 make image RETYC_CLI_IMAGE=ghcr.io/retyc/retyc-cli-dev RETYC_CLI_VERSION=master
 ```
 
