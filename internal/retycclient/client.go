@@ -1,12 +1,12 @@
 // Package retycclient wraps the `retyc` CLI binary as the CSI driver's only way to talk to the
-// Retyc API. Dataroom creation is entangled with the CLI's AGE key/crypto stack (GetActiveKey,
+// Retyc API. Storage space creation is entangled with the CLI's AGE key/crypto stack (GetActiveKey,
 // rekeys) — that logic lives in retyc-cli's internal/service package, which this
 // module cannot import (Go internal-package visibility), and is not something to reimplement
 // against the raw HTTP API. Every call passes --json; retyc-cli prints a stable typed JSON
 // payload on stdout on success and a JSON error object on stderr on failure (non-zero exit):
-// {"error": "...", "kind": "...", "status": 400, "detail": "..."} since retyc-cli 17e7230, only
-// {"error": "..."} before it. The kind is what this package branches on; an older CLI falls back
-// to the text of the error.
+// {"error": "...", "kind": "...", "status": 400, "detail": "..."}. The kind is what this package
+// branches on, never the text of the error. The driver needs retyc-cli v1.7.0-rc1 or later (the
+// `space` commands).
 package retycclient
 
 import (
@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -67,10 +66,9 @@ type Error struct {
 	Args    []string
 	Message string
 	// Kind is the CLI's stable classification of the error (the Kind* constants), "" when stderr
-	// carried none: a CLI older than the structured errors, or no JSON at all. The Is* predicates
-	// branch on it first and fall back to the text of Message only when it is empty.
+	// carried no JSON at all. The Is* predicates branch on it, never on the text of Message.
 	Kind string
-	// Status is the HTTP status of an API refusal, 0 for any other error or an older CLI.
+	// Status is the HTTP status of an API refusal, 0 for any other error.
 	Status int
 	// Detail is the API's own wording of a refusal: informative only, it may change.
 	Detail string
@@ -147,97 +145,32 @@ const (
 	KindEnrollmentDenied  = "enrollment_denied"
 )
 
-// classify returns the kind of a CLI error and its lowercased message, false when err is not one.
-// The kind is "" when the CLI gave none: the caller then reads the message.
-func classify(err error) (kind, msg string, ok bool) {
-	var e *Error
-	if !errors.As(err, &e) {
-		return "", "", false
-	}
-
-	return e.Kind, strings.ToLower(e.Message), true
-}
-
-// hasKind reports whether err is a CLI error of one of kinds. It never matches an error without a
-// kind: the predicates that have a text fallback use classify.
+// hasKind reports whether err is a CLI error of one of kinds.
 func hasKind(err error, kinds ...string) bool {
-	kind, _, ok := classify(err)
+	var e *Error
 
-	return ok && kind != "" && slices.Contains(kinds, kind)
+	return errors.As(err, &e) && slices.Contains(kinds, e.Kind)
 }
 
 // IsStorageExhausted reports whether err is a refusal for lack of storage: a reservation the
 // owner's plan cannot hold (plan_exceeded) or, by prudence, a write refused for lack of storage
-// (storage_exceeded). Without a kind, the API's text (`API error 400: {"detail":"Not enough storage
-// left on your plan"}`).
-func IsStorageExhausted(err error) bool {
-	kind, msg, ok := classify(err)
-	if kind != "" {
-		return kind == KindPlanExceeded || kind == KindStorageExceeded
-	}
-
-	return ok && strings.Contains(msg, "not enough storage left")
-}
-
-// The text fallbacks, for a CLI that predates the kinds (the pinned image may be one): they follow
-// the wording the CLI relays from the API.
-var (
-	// validationError is the start of the message of a 422, at its beginning or after a prefix of the
-	// CLI's ("creating dataroom: API error 422: ..."), not anywhere in the text.
-	validationError = regexp.MustCompile(`(^|: )api error 422:`)
-	// notFoundError is the start of the message of a 404, anchored the same way: a "not found" or a
-	// "404" elsewhere in the text (a 500 relaying a backend's 404, a title) is no missing resource.
-	notFoundError = regexp.MustCompile(`(^|: )api error 404:`)
-	// minimumCapacity is the API's refusal of a reservation below its minimum.
-	minimumCapacity = regexp.MustCompile(`must be at least \d+ bytes`)
-)
+// (storage_exceeded).
+func IsStorageExhausted(err error) bool { return hasKind(err, KindPlanExceeded, KindStorageExceeded) }
 
 // IsValidation reports whether err is the API's validation refusing the request: kind invalid (a
-// 400 or 422 the CLI does not classify further). Without a kind, any 422.
-func IsValidation(err error) bool {
-	kind, msg, ok := classify(err)
-	if kind != "" {
-		return kind == KindInvalid
-	}
-
-	return ok && validationError.MatchString(msg)
-}
+// 400 or 422 the CLI does not classify further).
+func IsValidation(err error) bool { return hasKind(err, KindInvalid) }
 
 // IsCapacityRefused reports whether err is a reservation below the API's minimum
-// (capacity_too_small). Without a kind, a 422 naming the storage_capacity field or the minimum
-// ("must be at least 21474836480 bytes").
-func IsCapacityRefused(err error) bool {
-	kind, msg, ok := classify(err)
-	if kind != "" {
-		return kind == KindCapacityTooSmall
-	}
-
-	return ok && validationError.MatchString(msg) &&
-		(strings.Contains(msg, "storage_capacity") || minimumCapacity.MatchString(msg))
-}
+// (capacity_too_small).
+func IsCapacityRefused(err error) bool { return hasKind(err, KindCapacityTooSmall) }
 
 // IsNotEnlarged reports whether err is the API's refusal to shrink a storage reservation
-// (capacity_shrink). Without a kind, its text ("... can only be enlarged").
-func IsNotEnlarged(err error) bool {
-	kind, msg, ok := classify(err)
-	if kind != "" {
-		return kind == KindCapacityShrink
-	}
+// (capacity_shrink).
+func IsNotEnlarged(err error) bool { return hasKind(err, KindCapacityShrink) }
 
-	return ok && strings.Contains(msg, "can only be enlarged")
-}
-
-// IsNotFound reports whether err is a missing resource, the API's 404 (not_found). Without a kind,
-// the 404 the CLI relays (`deleting dataroom: API error 404: {"detail":"Dataroom not found"}`),
-// matched at the start of the message or after a prefix of the CLI's (see notFoundError).
-func IsNotFound(err error) bool {
-	kind, msg, ok := classify(err)
-	if kind != "" {
-		return kind == KindNotFound || kind == KindGone
-	}
-
-	return ok && notFoundError.MatchString(msg)
-}
+// IsNotFound reports whether err is a missing resource, the API's 404 or 410 (not_found, gone).
+func IsNotFound(err error) bool { return hasKind(err, KindNotFound, KindGone) }
 
 // IsMachineRefused reports whether the machine account is refused, disabled or deleted (exit code
 // 77): see ErrMachineRefused.
@@ -247,21 +180,19 @@ func IsMachineRefused(err error) bool { return errors.Is(err, ErrMachineRefused)
 // ErrConfig.
 func IsConfig(err error) bool { return errors.Is(err, ErrConfig) }
 
-// IsConflict reports whether the API answered 409 (conflict). Kind only.
+// IsConflict reports whether the API answered 409 (conflict).
 func IsConflict(err error) bool { return hasKind(err, KindConflict) }
 
-// IsForbidden reports whether the API answered 403 (a viewer, a dataroom over its plan). Kind only.
+// IsForbidden reports whether the API answered 403 (a viewer, a storage space over its plan).
 func IsForbidden(err error) bool { return hasKind(err, KindForbidden) }
 
-// IsRateLimited reports whether the API's rate limit held after the CLI's own retries. Kind only.
+// IsRateLimited reports whether the API's rate limit held after the CLI's own retries.
 func IsRateLimited(err error) bool { return hasKind(err, KindRateLimited) }
 
 // IsCLITooOld reports whether the API refused this CLI as older than the minimum it accepts (426).
-// Kind only.
 func IsCLITooOld(err error) bool { return hasKind(err, KindCLITooOld) }
 
-// stderrError is the JSON object retyc prints on stderr with --json. An older CLI prints only
-// "error"; the other fields are then zero.
+// stderrError is the JSON object retyc prints on stderr with --json.
 type stderrError struct {
 	Error  string `json:"error"`
 	Kind   string `json:"kind"`
@@ -269,12 +200,11 @@ type stderrError struct {
 	Detail string `json:"detail"`
 }
 
-// parseStderrError extracts the JSON error object from stderr. The CLI's spinner writes ANSI escape
-// sequences to stderr even without a TTY (verified: `\r\x1b[K\x1b[36m⠋...` precedes the JSON on the
-// same line), so a plain Unmarshal of the whole buffer fails — locate the JSON object instead of
-// assuming stderr is clean. Without one, Error is the cleaned stderr text and the rest is zero.
+// parseStderrError extracts the JSON error object from stderr. The CLI's contract: the error object
+// is the last line of stderr, after any text warnings. Should something follow it all the same, the
+// object is searched for in the whole of stderr. Without one (a crash, a CLI killed at its timeout),
+// Error is the cleaned stderr text and the rest is zero.
 func parseStderrError(stderr []byte) stderrError {
-	// The CLI's contract: the error object is the last line of stderr, after any text warnings.
 	lines := bytes.Split(bytes.TrimSpace(stderr), []byte("\n"))
 	if last := bytes.TrimSpace(lines[len(lines)-1]); len(last) > 0 && last[0] == '{' {
 		var payload stderrError
@@ -282,12 +212,11 @@ func parseStderrError(stderr []byte) stderrError {
 			return payload
 		}
 	}
-	// Older CLIs: the spinner's escape sequences may precede the object on its line.
-	// Try every '{' from the first one on: the payload's own message may embed JSON (the API
-	// error body, e.g. {"detail":"Dataroom not found"}), so the *last* '{' is usually wrong,
-	// and the escape noise never contains '{' so the first candidate is normally right.
+	// Not the last line: try every '{' from the first one on. The payload's own message may embed
+	// JSON (the API error body, e.g. {"detail":"Dataroom not found"}), so the *last* '{' is usually
+	// wrong.
 	for idx := bytes.IndexByte(stderr, '{'); idx >= 0; {
-		// Decode stops after the first value: whatever the CLI may write after the object is ignored.
+		// Decode stops after the first value: whatever follows the object is ignored.
 		var payload stderrError
 		if err := json.NewDecoder(bytes.NewReader(stderr[idx:])).Decode(&payload); err == nil && payload.Error != "" {
 			return payload
@@ -444,20 +373,20 @@ func (c *Client) environ() ([]string, func(), error) {
 	return append(env, identity.MachineDirKey+"="+dir), cleanup, nil
 }
 
-// DataroomCreateResult mirrors retyc's dataroomCreateJSON (cmd/dataroom.go).
-type DataroomCreateResult struct {
+// SpaceCreateResult mirrors retyc's dataroomCreateJSON (cmd/dataroom.go).
+type SpaceCreateResult struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
 }
 
-// CreateDataroom creates a new dataroom titled title (the CSI volume name, always unique). A
+// CreateSpace creates a new storage space titled title (the CSI volume name, always unique). A
 // non-nil capacity reserves that many bytes on the owner's plan (--storage-capacity); a non-nil
 // versioning sets --versioning=true|false. Nil leaves the CLI's default.
-func (c *Client) CreateDataroom(
+func (c *Client) CreateSpace(
 	ctx context.Context, title string, capacity *int64, versioning *bool,
-) (*DataroomCreateResult, error) {
-	args := append([]string{"dataroom", "create", "--title", title}, settingArgs(capacity, versioning)...)
-	var result DataroomCreateResult
+) (*SpaceCreateResult, error) {
+	args := append([]string{"space", "create", "--title", title}, settingArgs(capacity, versioning)...)
+	var result SpaceCreateResult
 	if err := c.run(ctx, &result, args...); err != nil {
 		return nil, err
 	}
@@ -465,23 +394,23 @@ func (c *Client) CreateDataroom(
 	return &result, nil
 }
 
-// UpdateDataroom changes the storage reservation and/or the versioning of dataroom id through
-// `dataroom set`; only the non-nil settings are sent, and with both nil nothing runs. -y is
+// UpdateSpace changes the storage reservation and/or the versioning of storage space id through
+// `space set`; only the non-nil settings are sent, and with both nil nothing runs. -y is
 // mandatory alongside --json: disabling versioning asks for a confirmation the CLI refuses to
 // prompt for with --json. The reservation can only be enlarged: the API refuses a shrink
 // (capacity_shrink) and accepts the current value without effect.
-func (c *Client) UpdateDataroom(ctx context.Context, id string, capacity *int64, versioning *bool) error {
+func (c *Client) UpdateSpace(ctx context.Context, id string, capacity *int64, versioning *bool) error {
 	settings := settingArgs(capacity, versioning)
 	if len(settings) == 0 {
 		return nil
 	}
-	args := append([]string{"dataroom", "set", "retyc://" + id}, settings...)
+	args := append([]string{"space", "set", "retyc://" + id}, settings...)
 
 	// The JSON printed on success is not needed: the change either applied or failed.
 	return c.run(ctx, nil, append(args, "-y")...)
 }
 
-// settingArgs renders the optional dataroom settings shared by `dataroom create` and `dataroom set`.
+// settingArgs renders the optional storage space settings shared by `space create` and `space set`.
 func settingArgs(capacity *int64, versioning *bool) []string {
 	var args []string
 	if capacity != nil {
@@ -514,63 +443,65 @@ func FormatSize(bytes int64) string {
 	return strconv.FormatInt(bytes, 10) + "B"
 }
 
-// DataroomDeleteResult mirrors the anonymous JSON struct returned by `dataroom rm` on a root URI.
-type DataroomDeleteResult struct {
-	DataroomID   string `json:"dataroom_id"`
+// SpaceDeleteResult mirrors the anonymous JSON struct returned by `space rm` on a root URI. The CLI
+// keeps the JSON key dataroom_id.
+type SpaceDeleteResult struct {
+	SpaceID      string `json:"dataroom_id"`
 	URI          string `json:"uri"`
 	DeletedCount int    `json:"deleted_count"`
 }
 
-// DeleteDataroom deletes the whole dataroom (root URI) identified by id. -y is mandatory
+// DeleteSpace deletes the whole storage space (root URI) identified by id. -y is mandatory
 // alongside --json: retyc's confirm() refuses to prompt interactively when --json is set.
-func (c *Client) DeleteDataroom(ctx context.Context, id string) (*DataroomDeleteResult, error) {
-	var result DataroomDeleteResult
+func (c *Client) DeleteSpace(ctx context.Context, id string) (*SpaceDeleteResult, error) {
+	var result SpaceDeleteResult
 	uri := "retyc://" + id
-	if err := c.run(ctx, &result, "dataroom", "rm", uri, "-y"); err != nil {
+	if err := c.run(ctx, &result, "space", "rm", uri, "-y"); err != nil {
 		return nil, err
 	}
 
 	return &result, nil
 }
 
-// Dataroom mirrors internal/api.Dataroom (only the fields this driver needs).
-type Dataroom struct {
+// Space mirrors internal/api.Dataroom (only the fields this driver needs).
+type Space struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`
 	CreatedAt time.Time `json:"created_at"`
-	// StorageCapacity is the reserved capacity in bytes; nil when the dataroom is bounded by the
+	// StorageCapacity is the reserved capacity in bytes; nil when the storage space is bounded by the
 	// owner's plan instead (no reservation).
 	StorageCapacity *int64 `json:"storage_capacity,omitempty"`
 	// VersioningEnabled is nil when the API predates the setting (versioning on).
 	VersioningEnabled *bool `json:"versioning_enabled,omitempty"`
 }
 
-// DataroomList is the result of ListDatarooms.
-type DataroomList struct {
-	Items []Dataroom
+// SpaceList is the result of ListSpaces.
+type SpaceList struct {
+	Items []Space
 }
 
-// dataroomPage mirrors retyc's pagedJSON[api.Dataroom].
-type dataroomPage struct {
-	Items []Dataroom `json:"items"`
-	Total int        `json:"total"`
-	Page  int        `json:"page"`
-	Pages int        `json:"pages"`
+// spacePage mirrors retyc's pagedJSON[api.Dataroom].
+type spacePage struct {
+	Items []Space `json:"items"`
+	Total int     `json:"total"`
+	Page  int     `json:"page"`
+	Pages int     `json:"pages"`
 }
 
-// ListDatarooms returns every dataroom visible to the authenticated identity: `retyc dataroom
-// ls` walks all the pages itself and prints them as one list.
-func (c *Client) ListDatarooms(ctx context.Context) (*DataroomList, error) {
-	var page dataroomPage
-	if err := c.run(ctx, &page, "dataroom", "ls"); err != nil {
+// ListSpaces returns every storage space visible to the authenticated identity: `retyc space ls`
+// walks all the pages itself and prints them as one list.
+func (c *Client) ListSpaces(ctx context.Context) (*SpaceList, error) {
+	var page spacePage
+	if err := c.run(ctx, &page, "space", "ls"); err != nil {
 		return nil, err
 	}
 
-	return &DataroomList{Items: page.Items}, nil
+	return &SpaceList{Items: page.Items}, nil
 }
 
-// UserQuota mirrors internal/api.UserQuota. Nil MaxCountDataroom/MaxCountShare means unlimited.
-// There is no per-dataroom size cap in the API — only these account-wide totals.
+// UserQuota mirrors internal/api.UserQuota, whose field names follow the API (count_dataroom: the
+// storage spaces). Nil MaxCountDataroom/MaxCountShare means unlimited. There is no per-space size
+// cap in the API — only these account-wide totals.
 type UserQuota struct {
 	CountShare       int   `json:"count_share"`
 	MaxCountShare    *int  `json:"max_count_share"`
@@ -591,8 +522,8 @@ func (c *Client) Quota(ctx context.Context) (*UserQuota, error) {
 	return &q, nil
 }
 
-// HasDataroomQuota reports whether one more dataroom can be created.
-func (q *UserQuota) HasDataroomQuota() bool {
+// HasSpaceQuota reports whether one more storage space can be created.
+func (q *UserQuota) HasSpaceQuota() bool {
 	return q.MaxCountDataroom == nil || q.CountDataroom < *q.MaxCountDataroom
 }
 
@@ -625,17 +556,17 @@ func (c *Client) AuthStatusCheck(ctx context.Context) error {
 	return nil
 }
 
-// Roles of a dataroom member (`dataroom user add --role`).
+// Roles of a storage space member (`space user add --role`).
 const (
 	RoleViewer = "viewer"
 	RoleEditor = "editor"
 	RoleAdmin  = "admin"
 )
 
-// AddMember adds email to dataroom id with role, and rekeys the dataroom for it. The positional
+// AddMember adds email to storage space id with role, and rekeys the space for it. The positional
 // arguments follow "--", so that an e-mail starting with "-" is never taken for a flag.
-func (c *Client) AddMember(ctx context.Context, dataroomID, email, role string) error {
-	return c.run(ctx, nil, "dataroom", "user", "add", "--role", role, "--", dataroomID, email)
+func (c *Client) AddMember(ctx context.Context, spaceID, email, role string) error {
+	return c.run(ctx, nil, "space", "user", "add", "--role", role, "--", spaceID, email)
 }
 
 // Events of `machine enroll --json`, one JSON object per line on stdout.

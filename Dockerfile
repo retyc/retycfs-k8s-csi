@@ -1,7 +1,7 @@
 # The retyc-cli release embedded in the image — the single source of truth for that version.
 # Bump it here (Dependabot proposes it); `make image RETYC_CLI_VERSION=...` overrides for a
 # one-off build. It must match the mount pods' image in the chart's values.yaml.
-ARG RETYC_CLI_VERSION=v1.6.1
+ARG RETYC_CLI_VERSION=v1.7.0-rc1
 # Registry/repository of the retyc-cli image; `make image RETYC_CLI_IMAGE=...` overrides it (e.g.
 # the development CLI, ghcr.io/retyc/retyc-cli-dev: make image-dev).
 ARG RETYC_CLI_IMAGE=ghcr.io/retyc/retyc-cli
@@ -29,7 +29,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -o /retycfs-k8s-csi .
 
 # Reuse the officially published retyc-cli image instead of vendoring/rebuilding the binary —
-# dataroom management is security-sensitive (AGE crypto) and should always run
+# storage space management is security-sensitive (AGE crypto) and should always run
 # the same vetted build the CLI team ships. Pulled from GitHub's registry (same digest as the
 # Docker Hub mirror, no anonymous pull limits, provenance attached to the source repository).
 FROM ${RETYC_CLI_IMAGE}:${RETYC_CLI_VERSION} AS retyc
@@ -54,7 +54,7 @@ ARG REVISION
 ARG CREATED
 
 LABEL org.opencontainers.image.title="RetycFS CSI Driver" \
-      org.opencontainers.image.description="Kubernetes CSI driver for Retyc datarooms: ReadWriteMany volumes with end-to-end post-quantum encryption" \
+      org.opencontainers.image.description="Kubernetes CSI driver for Retyc storage spaces: ReadWriteMany volumes with end-to-end post-quantum encryption" \
       org.opencontainers.image.vendor="Retyc / TripleStack SAS" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.url="https://retyc.com" \

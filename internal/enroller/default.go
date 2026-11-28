@@ -16,7 +16,7 @@ import (
 // deleted by hand is created again and enrolls anew, with new keys and a new request to approve:
 // its Secret is replaced even while PVs use it (the default PVs name none, blocking would only
 // leave them without identity), with a Warning event ClusterIdentityReplaced, since the existing
-// datarooms belong to the previous machine and an administrator must add the new one to them.
+// storage spaces belong to the previous machine and an administrator must add the new one to them.
 // This is wanted in cluster mode, where the driver always asks for its default identity; to stop
 // it, unset --default-organization-id. It reports whether it created one.
 func (e *Enroller) EnsureClusterIdentity(ctx context.Context) (bool, error) {

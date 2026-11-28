@@ -87,7 +87,7 @@ const machineFileMode int32 = 0o400
 // Spec is what one volume's mount pod needs on one node. Everything but the PVC fields goes into
 // the config hash.
 type Spec struct {
-	// VolumeID is the dataroom ID (the CSI volume handle); it names the mount point and the spool.
+	// VolumeID is the storage space ID (the CSI volume handle); it names the mount point and the spool.
 	VolumeID string
 	NodeName string
 	// PVCName and PVCNamespace label the pod; empty for a static PV without a claim reference.

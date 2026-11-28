@@ -39,12 +39,12 @@ func newFakeRetyc(t *testing.T) *fakeRetyc {
 d=` + f.dir + `
 echo "$(cat "$RETYC_MACHINE_DIR/client.key" 2>/dev/null) $*" >> "$d/calls"
 case "$2 $3" in
-  "dataroom user") c=member ;;
-  "dataroom ls") c=ls ;;
+  "space user") c=member ;;
+  "space ls") c=ls ;;
   "user quota") c=quota ;;
-  "dataroom create") c=create ;;
-  "dataroom set") c=set ;;
-  "dataroom rm") c=rm ;;
+  "space create") c=create ;;
+  "space set") c=set ;;
+  "space rm") c=rm ;;
   *) echo "{\"error\":\"unexpected: $*\"}" >&2; exit 2 ;;
 esac
 if [ -f "$d/$c.err" ]; then cat "$d/$c.err" >&2; exit 1; fi
@@ -173,9 +173,9 @@ func TestCreateVolume_CreatesWithCapacityAndVersioning(t *testing.T) {
 		t.Fatalf("volume context = %v", ctx)
 	}
 	want := []string{
-		"default dataroom ls",
+		"default space ls",
 		"default user quota",
-		"default dataroom create --title pvc-1 --storage-capacity 25GiB --versioning=false",
+		"default space create --title pvc-1 --storage-capacity 25GiB --versioning=false",
 	}
 	if got := f.calls(); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("calls = %q, want %q", got, want)
@@ -193,12 +193,12 @@ func TestCreateVolume_TenantSecretsAndDefaultVersioning(t *testing.T) {
 	}
 	calls := f.calls()
 	// No mutable parameter: the CLI's default versioning applies.
-	if last := calls[len(calls)-1]; last != "tenant dataroom create --title pvc-1 --storage-capacity 25GiB" {
+	if last := calls[len(calls)-1]; last != "tenant space create --title pvc-1 --storage-capacity 25GiB" {
 		t.Fatalf("calls = %q", calls)
 	}
 }
 
-func TestCreateVolume_ReusesAnExistingDataroom(t *testing.T) {
+func TestCreateVolume_ReusesAnExistingSpace(t *testing.T) {
 	f := newFakeRetyc(t)
 	f.set("ls.json", `{"items":[{"id":"dr-other","title":"pvc-0"},{"id":"dr-1","title":"pvc-1"}]}`)
 	// The account is full, but the retried create needs no new slot.
@@ -217,7 +217,7 @@ func TestCreateVolume_ReusesAnExistingDataroom(t *testing.T) {
 	}
 }
 
-func TestCreateVolume_ExistingDataroomCapacity(t *testing.T) {
+func TestCreateVolume_ExistingSpaceCapacity(t *testing.T) {
 	ok := claim(map[string]string{AnnotationUID: "1000"})
 
 	// Reservation larger than requested: reused, the real capacity is reported.
@@ -320,7 +320,7 @@ func TestCreateVolume_QuotaAndCLIErrors(t *testing.T) {
 	wantCode(t, err, codes.ResourceExhausted)
 
 	f = newFakeRetyc(t)
-	f.set("create.err", `{"error":"API error 403: plan storage exceeded"}`)
+	f.set("create.err", `{"error":"API error 500: plan storage exceeded","kind":"api_error","status":500}`)
 	_, err = f.controller(ok).CreateVolume(context.Background(), createRequest())
 	wantCode(t, err, codes.Internal)
 	if !strings.Contains(err.Error(), "plan storage exceeded") {
@@ -328,18 +328,23 @@ func TestCreateVolume_QuotaAndCLIErrors(t *testing.T) {
 	}
 
 	f = newFakeRetyc(t)
-	f.set("ls.err", `{"error":"not authenticated"}`)
+	f.set("ls.err", `{"error":"listing storage spaces: boom","kind":"error"}`)
 	_, err = f.controller(ok).CreateVolume(context.Background(), createRequest())
 	wantCode(t, err, codes.Internal)
 
 	// The API's refusals of a reservation.
-	for msg, code := range map[string]codes.Code{
-		`API error 400: {\"detail\":\"Not enough storage left on your plan\"}`:                codes.ResourceExhausted,
-		`API error 422: {\"detail\":\"storage_capacity must be at least 21474836480 bytes\"}`: codes.OutOfRange,
-		`API error 422: {\"detail\":\"title: field required\"}`:                               codes.InvalidArgument,
+	for _, tc := range []struct {
+		msg, kind string
+		code      codes.Code
+	}{
+		{`API error 400: {\"detail\":\"Not enough storage left on your plan\"}`, "plan_exceeded", codes.ResourceExhausted},
+		{`API error 422: {\"detail\":\"storage_capacity must be at least 21474836480 bytes\"}`, "capacity_too_small",
+			codes.OutOfRange},
+		{`API error 422: {\"detail\":\"title: field required\"}`, "invalid", codes.InvalidArgument},
 	} {
+		code := tc.code
 		f = newFakeRetyc(t)
-		f.set("create.err", `{"error":"`+msg+`"}`)
+		f.set("create.err", `{"error":"`+tc.msg+`","kind":"`+tc.kind+`"}`)
 		_, err = f.controller(ok).CreateVolume(context.Background(), createRequest())
 		wantCode(t, err, code)
 		if !strings.Contains(err.Error(), "API error") {
@@ -358,10 +363,10 @@ func TestCreateVolume_CapacityFloor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := resp.GetVolume().GetCapacityBytes(); got != MinDataroomCapacity {
-		t.Fatalf("capacity = %d, want %d", got, MinDataroomCapacity)
+	if got := resp.GetVolume().GetCapacityBytes(); got != MinSpaceCapacity {
+		t.Fatalf("capacity = %d, want %d", got, MinSpaceCapacity)
 	}
-	if calls := f.calls(); calls[len(calls)-1] != "default dataroom create --title pvc-1 --storage-capacity 20GiB" {
+	if calls := f.calls(); calls[len(calls)-1] != "default space create --title pvc-1 --storage-capacity 20GiB" {
 		t.Fatalf("calls = %q", calls)
 	}
 
@@ -378,7 +383,7 @@ func TestCreateVolume_CapacityFloor(t *testing.T) {
 		if _, err := f.controller(ok).CreateVolume(context.Background(), req); err != nil {
 			t.Fatal(err)
 		}
-		if calls := f.calls(); calls[len(calls)-1] != "default dataroom create --title pvc-1"+tc.want {
+		if calls := f.calls(); calls[len(calls)-1] != "default space create --title pvc-1"+tc.want {
 			t.Fatalf("range %v: calls = %q", tc.r, calls)
 		}
 	}
@@ -398,34 +403,35 @@ func TestControllerExpandVolume(t *testing.T) {
 	if resp.GetCapacityBytes() != 20<<30 || resp.GetNodeExpansionRequired() {
 		t.Fatalf("response = %+v", resp)
 	}
-	if got := f.calls(); len(got) != 2 || got[1] != "tenant dataroom set retyc://dr-1 --storage-capacity 20GiB -y" {
+	if got := f.calls(); len(got) != 2 || got[1] != "tenant space set retyc://dr-1 --storage-capacity 20GiB -y" {
 		t.Fatalf("calls = %q", got)
 	}
 
 	_, err = s.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{VolumeId: "dr-1"})
 	wantCode(t, err, codes.InvalidArgument)
 
-	f.set("set.err", `{"error":"API error 400: a storage reservation can only be enlarged"}`)
+	f.set("set.err", `{"error":"API error 400: a storage reservation can only be enlarged",`+
+		`"kind":"capacity_shrink","status":400}`)
 	_, err = s.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
 		VolumeId: "dr-1", CapacityRange: &csi.CapacityRange{RequiredBytes: 1 << 30},
 	})
 	wantCode(t, err, codes.OutOfRange)
 
-	f.set("set.err", `{"error":"API error 404: {\"detail\":\"Dataroom not found\"}"}`)
+	f.set("set.err", `{"error":"API error 404: {\"detail\":\"Dataroom not found\"}","kind":"not_found","status":404}`)
 	_, err = s.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
 		VolumeId: "dr-404", CapacityRange: &csi.CapacityRange{RequiredBytes: 1 << 30},
 	})
 	wantCode(t, err, codes.NotFound)
 
-	f.set("set.err", `{"error":"API error 400: {\"detail\":\"Not enough storage left on your plan\"}"}`)
+	f.set("set.err", `{"error":"API error 400: {\"detail\":\"Not enough storage left on your plan\"}",`+
+		`"kind":"plan_exceeded","status":400}`)
 	_, err = s.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
 		VolumeId: "dr-1", CapacityRange: &csi.CapacityRange{RequiredBytes: 1 << 40},
 	})
 	wantCode(t, err, codes.ResourceExhausted)
 }
 
-// The kinds of a CLI with structured errors decide the code, whatever the text says; without a kind
-// (an older CLI), the text does (see TestCreateVolume_QuotaAndCLIErrors).
+// The kinds of the CLI's errors decide the code, whatever the text says.
 func TestCLIErrorKinds(t *testing.T) {
 	ok := claim(map[string]string{AnnotationUID: "1000"})
 	stderr := func(kind string) string {
@@ -474,7 +480,7 @@ func TestCLIErrorKinds(t *testing.T) {
 		t.Fatalf("error = %v, want a hint on the CLI version", err)
 	}
 	f = newFakeRetyc(t)
-	f.set("rm.err", `{"error":"deleting dataroom: API error 404: {\"detail\":\"Dataroom not found\"}",`+
+	f.set("rm.err", `{"error":"deleting storage space: API error 404: {\"detail\":\"Dataroom not found\"}",`+
 		`"kind":"not_found","status":404,"detail":"Dataroom not found"}`)
 	deleteVolume := func() error {
 		_, err := f.controller().DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: "dr-1"})
@@ -482,17 +488,17 @@ func TestCLIErrorKinds(t *testing.T) {
 		return err
 	}
 	if err := deleteVolume(); err != nil {
-		t.Fatalf("DeleteVolume of a dataroom gone: %v", err)
+		t.Fatalf("DeleteVolume of a storage space gone: %v", err)
 	}
 	f.set("rm.err", `{"error":"API error 429: slow down","kind":"rate_limited","status":429}`)
 	wantCode(t, deleteVolume(), codes.Unavailable)
 
-	// A kind wins over the text: a 404 the CLI classifies as something else is no missing dataroom.
-	f.set("rm.err", `{"error":"deleting dataroom: API error 404: x","kind":"api_error","status":404}`)
+	// A kind wins over the text: a 404 the CLI classifies as something else is no missing storage space.
+	f.set("rm.err", `{"error":"deleting storage space: API error 404: x","kind":"api_error","status":404}`)
 	wantCode(t, deleteVolume(), codes.Internal)
 
 	f = newFakeRetyc(t)
-	f.set("set.err", `{"error":"updating dataroom: API error 404: x","kind":"not_found","status":404}`)
+	f.set("set.err", `{"error":"updating storage space: API error 404: x","kind":"not_found","status":404}`)
 	_, err = f.controller().ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
 		VolumeId: "dr-404", CapacityRange: &csi.CapacityRange{RequiredBytes: 30 << 30},
 	})
@@ -508,10 +514,10 @@ func TestControllerExpandVolume_CapacityFloor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.GetCapacityBytes() != MinDataroomCapacity {
-		t.Fatalf("capacity = %d, want %d", resp.GetCapacityBytes(), MinDataroomCapacity)
+	if resp.GetCapacityBytes() != MinSpaceCapacity {
+		t.Fatalf("capacity = %d, want %d", resp.GetCapacityBytes(), MinSpaceCapacity)
 	}
-	if calls := f.calls(); calls[len(calls)-1] != "default dataroom set retyc://dr-1 --storage-capacity 20GiB -y" {
+	if calls := f.calls(); calls[len(calls)-1] != "default space set retyc://dr-1 --storage-capacity 20GiB -y" {
 		t.Fatalf("calls = %q", calls)
 	}
 	_, err = s.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
@@ -537,7 +543,7 @@ func TestControllerExpandVolume_AlreadyReserved(t *testing.T) {
 		}
 	}
 	for _, c := range f.calls() {
-		if strings.Contains(c, "dataroom set") {
+		if strings.Contains(c, "space set") {
 			t.Fatalf("set ran: %q", f.calls())
 		}
 	}
@@ -593,7 +599,7 @@ func TestControllerModifyVolume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := f.calls(); len(got) != 1 || got[0] != "default dataroom set retyc://dr-1 --versioning=false -y" {
+	if got := f.calls(); len(got) != 1 || got[0] != "default space set retyc://dr-1 --versioning=false -y" {
 		t.Fatalf("calls = %q", got)
 	}
 
@@ -611,7 +617,7 @@ func TestControllerModifyVolume(t *testing.T) {
 	})
 	wantCode(t, err, codes.InvalidArgument)
 
-	f.set("set.err", `{"error":"API error 500: boom"}`)
+	f.set("set.err", `{"error":"API error 500: boom","kind":"api_error","status":500}`)
 	_, err = s.ControllerModifyVolume(ctx, &csi.ControllerModifyVolumeRequest{
 		VolumeId: "dr-1", MutableParameters: map[string]string{versioningParameter: "true"},
 	})

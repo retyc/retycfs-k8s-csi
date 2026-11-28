@@ -1,6 +1,6 @@
 apiVersion: v2
 name: retycfs-csi
-description: Kubernetes CSI driver for Retyc datarooms - ReadWriteMany volumes with end-to-end post-quantum encryption
+description: Kubernetes CSI driver for Retyc storage spaces - ReadWriteMany volumes with end-to-end post-quantum encryption
 type: application
 version: 0.7.0
 appVersion: "v0.7.0"
@@ -13,7 +13,7 @@ keywords:
   - storage
   - retyc
   - retycfs
-  - dataroom
+  - storage-space
   - readwritemany
   - encryption
 maintainers:

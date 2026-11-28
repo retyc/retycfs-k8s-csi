@@ -1,7 +1,7 @@
 # retycfs-csi
 
 Helm chart for the [RetycFS CSI driver](https://github.com/retyc/retycfs-k8s-csi): `ReadWriteMany` Kubernetes volumes
-backed by Retyc datarooms, with end-to-end post-quantum encryption.
+backed by Retyc storage spaces, with end-to-end post-quantum encryption.
 
 ## Install
 
@@ -100,7 +100,7 @@ StatefulSet's pods stay `Pending` and its events repeat the refusal.
 | `node.extraVolumes` / `node.extraVolumeMounts` | `[]` | Extra volumes for the driver container |
 | `node.updateStrategy` | `RollingUpdate`, `maxUnavailable: 1` | |
 | `node.{podAnnotations,podLabels,nodeSelector,tolerations,affinity,priorityClassName}` | tolerate all | Scheduling |
-| `mount.image.*` | `ghcr.io/retyc/retyc-cli:v1.6.1` | Mount pods' image; must match the Dockerfile's `RETYC_CLI_VERSION` (checked in CI) |
+| `mount.image.*` | `ghcr.io/retyc/retyc-cli:v1.7.0-rc1` | Mount pods' image; must match the Dockerfile's `RETYC_CLI_VERSION` (checked in CI) |
 | `mount.imagePullSecrets` | `[]` | Pull secrets of the retyc-cli image |
 | `mount.extraEnv` / `mount.hostAliases` | `[]` | Extra environment (after the driver's) and `/etc/hosts` entries of the mount pods |
 | `mount.hostPID` | `false` | Share the host PID namespace (diagnosis only) |

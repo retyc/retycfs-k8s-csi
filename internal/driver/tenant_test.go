@@ -126,7 +126,7 @@ func TestStageDefaultIdentityTenantCheckAPI(t *testing.T) {
 	}
 }
 
-// No PV for the handle: the driver's identity is refused. Two PVs on the same dataroom, a global
+// No PV for the handle: the driver's identity is refused. Two PVs on the same space, a global
 // one and a tenant one: the tenant one is refused, whichever the listing returns first.
 func TestStageDefaultIdentityAllPVs(t *testing.T) {
 	e := newNodeEnv(t)

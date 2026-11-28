@@ -11,7 +11,7 @@
 
 **RetycFS CSI driver** is a CSI driver that uses your [Retyc](https://retyc.com) account to support dynamic
 provisioning of `ReadWriteMany` Kubernetes Persistent Volumes via Persistent Volume Claims. Each Persistent Volume is
-a Retyc dataroom, mounted on the nodes with **RetycFS**, the filesystem of the
+a Retyc storage space, mounted on the nodes with **RetycFS**, the filesystem of the
 [`retyc` CLI](https://github.com/retyc/retyc-cli), and encrypted end to end on the node before anything reaches the
 Retyc servers.
 
@@ -26,8 +26,8 @@ can be expanded, and their versioning switched through a VolumeAttributesClass.
 - a namespace for the driver that allows privileged pods (Pod Security `privileged`): `retycfs-system`, created below;
 - a Retyc organization, its UUID, and an administrator of it who approves the driver's machine account. The driver
   holds no token and no passphrase: it enrolls a [machine account](doc/configuration.md#identities).
-- for a custom `mount.image.tag` or driver image: retyc-cli v1.6.0 or later (machine accounts, `retyc machine
-  enroll`). The chart's defaults already use it.
+- for a custom `mount.image.tag` or driver image: retyc-cli v1.7.0-rc1 or later (machine accounts, `retyc machine
+  enroll`; `retyc space` commands). The chart's defaults already use it.
 
 ## How to deploy RetycFS CSI driver to your cluster
 
@@ -73,7 +73,7 @@ $ kubectl create -f https://raw.githubusercontent.com/retyc/retycfs-k8s-csi/mast
 $ kubectl logs -f retycfs-reader
 ```
 
-The reader prints the lines the writer appends. Check `retyc dataroom ls`, or the Retyc web app: the dataroom is
+The reader prints the lines the writer appends. Check `retyc space ls`, or the Retyc web app: the storage space is
 there, named after the volume. The volume's mount pod runs next to the driver:
 
 ```console
@@ -86,7 +86,7 @@ Delete the test resources:
 $ kubectl delete -f https://raw.githubusercontent.com/retyc/retycfs-k8s-csi/master/examples/manifests/rwx-test.yaml
 ```
 
-The dataroom is gone as well.
+The storage space is gone as well.
 
 ### Deploying your own PersistentVolumeClaims
 
@@ -108,8 +108,8 @@ spec:
       storage: 20Gi
 ```
 
-- `retycfs-rwx`: deleting the claim deletes the dataroom;
-- `retycfs-rwx-retain`: deleting the claim keeps the dataroom;
+- `retycfs-rwx`: deleting the claim deletes the storage space;
+- `retycfs-rwx-retain`: deleting the claim keeps the storage space;
 - `retycfs-rwx-tenant`: same, with the machine account of the claim's namespace instead of the cluster-wide one. The
   namespace applies a `RetycIdentity` named `default` and has it approved first (see
   [doc/configuration.md](doc/configuration.md#identities)). `retycfs-rwx` and `retycfs-rwx-retain` exist only with
@@ -121,11 +121,11 @@ dies and is recreated, the pod then sees its volume come back without restarting
 [doc/architecture.md](doc/architecture.md#recovery)). The other annotations (cache, resources of the mount pod,
 read-only...) are in [doc/configuration.md](doc/configuration.md#pvc-annotations).
 
-A dataroom belongs to the machine account that created it. To add people to it at creation, use the
+A storage space belongs to the machine account that created it. To add people to it at creation, use the
 `csi.retycfs.com/initial-members` annotation, and read
-[Dataroom lifecycle](doc/configuration.md#dataroom-lifecycle-and-ownership-transfer) before retiring an identity.
+[Storage space lifecycle](doc/configuration.md#storage-space-lifecycle-and-ownership-transfer) before retiring an identity.
 
-Every pod mounting the claim, on any node, shares the same dataroom. It behaves like a network drive: `close` returns
+Every pod mounting the claim, on any node, shares the same storage space. It behaves like a network drive: `close` returns
 once the file is stored, a change made on one node shows up on the others within the cache TTL (one minute by
 default), and concurrent writes to one file are not safe. Good for documents, configuration and artefacts; not for
 databases.
@@ -133,7 +133,7 @@ databases.
 ## Documentation
 
 - [charts/retycfs-csi/README.md](charts/retycfs-csi/README.md): chart values
-- [doc/configuration.md](doc/configuration.md): PVC annotations, static PVs, versioning, identities, dataroom
+- [doc/configuration.md](doc/configuration.md): PVC annotations, static PVs, versioning, identities, storage space
   ownership transfer, Redis cache, metrics
 - [doc/troubleshooting.md](doc/troubleshooting.md): mount pod logs, exit codes, events
 - [doc/architecture.md](doc/architecture.md): how it works, mount pods, recovery, consistency, security, limitations

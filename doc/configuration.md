@@ -20,13 +20,13 @@ pod (see [architecture.md](architecture.md#settings-read-at-stage)). `csi.retycf
 | `csi.retycfs.com/unsafe-write`         | no                      | `true` / `false`                                                                                                                                                     | the API acknowledges an upload before the chunk is stored (`--unsafe-write`): faster `close`, but a store that fails afterwards is reported to nobody                                                                                |
 | `csi.retycfs.com/read-only`            | no                      | `true` / `false`                                                                                                                                                     | mounts read-only whatever the identity's role (`--read-only`)                                                                                                                                                                        |
 | `csi.retycfs.com/warmup`               | no                      | `true` / `false`                                                                                                                                                     | once mounted, lists every folder in the background to fill the listing cache (`--warmup`); see [Warmup](#warmup)                                                                                                                     |
-| `csi.retycfs.com/warmup-depth`         | no                      | integer, `0` (every level, the default) or more                                                                                                                      | levels of folders the warmup lists, the dataroom's root being the first (`--warmup-depth`)                                                                                                                                           |
+| `csi.retycfs.com/warmup-depth`         | no                      | integer, `0` (every level, the default) or more                                                                                                                      | levels of folders the warmup lists, the storage space's root being the first (`--warmup-depth`)                                                                                                                                      |
 | `csi.retycfs.com/local-file`           | no                      | patterns separated by spaces, or `none` alone                                                                                                                        | names of files kept in the mount pod's spool and never sent (`--local-file`); replaces the CLI's default `.*.swp .*.swx *~ 4913`; `none` sends every file, and cannot be combined with patterns                                      |
 | `csi.retycfs.com/mount-cpu-request`    | no                      | positive Kubernetes quantity (`100m`)                                                                                                                                | CPU request of the volume's mount pods                                                                                                                                                                                               |
 | `csi.retycfs.com/mount-cpu-limit`      | no                      | quantity                                                                                                                                                             | CPU limit (none by default)                                                                                                                                                                                                          |
 | `csi.retycfs.com/mount-memory-request` | no                      | quantity (`512Mi`)                                                                                                                                                   | memory request                                                                                                                                                                                                                       |
 | `csi.retycfs.com/mount-memory-limit`   | no                      | quantity                                                                                                                                                             | memory limit                                                                                                                                                                                                                         |
-| `csi.retycfs.com/initial-members`      | no                      | `alice@acme.fr:admin,bob@acme.fr:editor,carol@acme.fr`: comma-separated e-mail addresses, each optionally followed by `:admin`, `:editor` or `:viewer` (the default) | people added to the dataroom when the driver creates it. See [Initial members](#initial-members)                                                                                                                                     |
+| `csi.retycfs.com/initial-members`      | no                      | `alice@acme.fr:admin,bob@acme.fr:editor,carol@acme.fr`: comma-separated e-mail addresses, each optionally followed by `:admin`, `:editor` or `:viewer` (the default) | people added to the storage space when the driver creates it. See [Initial members](#initial-members)                                                                                                                                |
 
 Example:
 
@@ -61,7 +61,7 @@ What to know:
 
 - **The pod must run with the UID of the annotation**, or it cannot write: it reads, and gets `Permission denied` on
   every write. Nothing checks it beforehand.
-- An identity with the **viewer** role on the dataroom gets a read-only mount. A role changed since the mount needs a
+- An identity with the **viewer** role on the storage space gets a read-only mount. A role changed since the mount needs a
   remount of the volume on each node.
 - With the **contributor** role, replacing a file by `rename` fails (`EACCES`): the "temporary file, then rename"
   pattern of editors and of many tools does not work.
@@ -82,15 +82,15 @@ What to know:
             storage: 20Gi
   ```
 
-- <a id="initial-members"></a>**Initial members.** Retyc is the source of truth for who can open a dataroom. The
-  annotation is read **only when the driver creates the dataroom** and is never applied again: changing it later, or
-  adopting an existing dataroom, changes nothing. After that, manage the members in Retyc. An entry the driver cannot
+- <a id="initial-members"></a>**Initial members.** Retyc is the source of truth for who can open a storage space. The
+  annotation is read **only when the driver creates the storage space** and is never applied again: changing it later, or
+  adopting an existing storage space, changes nothing. After that, manage the members in Retyc. An entry the driver cannot
   add (a refusal of the API) does not fail the volume: the claim gets a `Warning` event
   (`InitialMembers`) and the driver does not retry. A claim whose list has no `admin` gets a `NoHumanAdmin` warning,
-  see [Dataroom lifecycle](#dataroom-lifecycle-and-ownership-transfer). A malformed value is refused at creation.
+  see [Storage space lifecycle](#storage-space-lifecycle-and-ownership-transfer). A malformed value is refused at creation.
   The members are added in the background, right after the creation (5 minutes at most): a controller that stops
   finishes them first, which its `terminationGracePeriodSeconds` of 330 s allows.
-- <a id="warmup"></a>**Warmup.** With `csi.retycfs.com/warmup`, each mount pod lists the dataroom's folders in the
+- <a id="warmup"></a>**Warmup.** With `csi.retycfs.com/warmup`, each mount pod lists the storage space's folders in the
   background once mounted, like a `find` run right after the stage, so that an application scanning its volume at
   startup is answered from the cache. Only names and attributes are listed, never file contents. The mount does not
   wait for it: the stage ends as soon as the mount is ready, and the walk stops when the unstage begins.
@@ -106,11 +106,11 @@ What to know:
 
 ## Static PVs
 
-A dataroom that already exists (retained from a deleted claim, or created with `retyc dataroom create`) becomes a
-volume through a static PV whose `volumeHandle` is the dataroom ID:
+A storage space that already exists (retained from a deleted claim, or created with `retyc space create`) becomes a
+volume through a static PV whose `volumeHandle` is the storage space ID:
 
 ```sh
-retyc --json dataroom ls          # id + title
+retyc --json space ls    # id + title
 ```
 
 The mount settings of a static PV are read from its `volumeAttributes`, with the **same keys as the annotations**
@@ -137,7 +137,7 @@ tenant identity with no claim (`FailedPrecondition ... names no claim namespace`
 ```yaml
   csi:
     driver: csi.retycfs.com
-    volumeHandle: <dataroom ID>
+    volumeHandle: <space ID>
     volumeAttributes:
       csi.retycfs.com/uid: "1000"
       pvcName: <claim>
@@ -147,17 +147,17 @@ tenant identity with no claim (`FailedPrecondition ... names no claim namespace`
       namespace: retycfs-system
 ```
 
-The tenant's machine also needs access to the dataroom: a dataroom created by another machine (or by a person) is
-not open to it until an administrator of the dataroom adds it in Retyc.
+The tenant's machine also needs access to the storage space: a storage space created by another machine (or by a person) is
+not open to it until an administrator of the storage space adds it in Retyc.
 
-Every PV of the handle must pass: a global PV written on the same dataroom does not let a tenant one through. A
+Every PV of the handle must pass: a global PV written on the same storage space does not let a tenant one through. A
 handle with no PV at all is refused too (kubelet only stages a volume that has one). A PV whose class no longer
 exists, or that has none, is not refused. The node plugin needs `get` and `list` on
 PersistentVolumes and `get` on StorageClasses (in the chart's ClusterRole).
 
 ## VolumeAttributesClass (versioning)
 
-The `versioning` parameter of a VolumeAttributesClass (`true` or `false`) sets the dataroom's versioning, at creation
+The `versioning` parameter of a VolumeAttributesClass (`true` or `false`) sets the storage space's versioning, at creation
 and whenever the claim switches classes (`ControllerModifyVolume`). It is the only parameter: any other key is refused.
 
 ```yaml
@@ -200,7 +200,7 @@ size in `df` within the cache TTL (1 min by default). The filesystem access mode
 read-only.
 
 `ReadWriteOncePod` is supported; Kubernetes enforces the single pod, the driver mounts it like any other volume;
-exclusivity only holds inside the cluster: the dataroom stays reachable from the Retyc web app or another cluster (same
+exclusivity only holds inside the cluster: the storage space stays reachable from the Retyc web app or another cluster (same
 as `ReadWriteOnce`).
 
 ## Identities
@@ -235,7 +235,7 @@ spec: # optional
 - `spec.organizationID` defaults to `identity.organizationID` of the chart, and is **immutable**: to change it, delete
   and recreate the object (a new machine). Without either, the phase is `Rejected`.
 - Deleting the object never deletes the machine on the Retyc side: disable and remove it there (see
-  [Dataroom lifecycle](#dataroom-lifecycle-and-ownership-transfer)).
+  [Storage space lifecycle](#storage-space-lifecycle-and-ownership-transfer)).
 
 ### Enrollment and approval
 
@@ -265,9 +265,9 @@ spec: # optional
    retyc machine approve <enrollment-id> --fingerprint XXXX-XXXX-XXXX
    ```
 
-   When the organization has no master key, Retyc asks the administrator to acknowledge that the machine's datarooms
+   When the organization has no master key, Retyc asks the administrator to acknowledge that the machine's storage spaces
    are recoverable only through the members it adds (the CLI asks for a confirmation, which `-y` gives): see
-   [Initial members](#initial-members) and [Dataroom lifecycle](#dataroom-lifecycle-and-ownership-transfer).
+   [Initial members](#initial-members) and [Storage space lifecycle](#storage-space-lifecycle-and-ownership-transfer).
 
 3. The enroller stores the keys in the identity's Secret. The phase becomes `Approved`.
 
@@ -362,22 +362,22 @@ hand disables `admissionPolicy` for the time of the repair. This policy always f
 Examples, with a namespace, its `RetycIdentity`, a claim and two pods: [
 `examples/manifests/tenant.yaml`](../examples/manifests/tenant.yaml).
 
-## Dataroom lifecycle and ownership transfer
+## Storage space lifecycle and ownership transfer
 
-A dataroom **belongs to the machine account that created it**: the one of the claim's namespace for a tenant class, the
-cluster's for the other classes. A machine cannot be removed from Retyc while it owns datarooms, and a recreated
+A storage space **belongs to the machine account that created it**: the one of the claim's namespace for a tenant class, the
+cluster's for the other classes. A machine cannot be removed from Retyc while it owns storage spaces, and a recreated
 `RetycIdentity` is another machine, with no access to the former volumes. Plan the ownership before the first claim.
 
-1. **Have a human administrator of the dataroom.** Put people in `csi.retycfs.com/initial-members` when the claim is
+1. **Have a human administrator of the storage space.** Put people in `csi.retycfs.com/initial-members` when the claim is
    created (`alice@acme.fr:admin`), or add them in Retyc **while the machine is still active**. Without an `admin` in
-   the list, the claim gets a `NoHumanAdmin` warning: only the machine could then transfer the dataroom.
-2. **Transfer the ownership.** An administrator of the Retyc organization runs, for each dataroom:
+   the list, the claim gets a `NoHumanAdmin` warning: only the machine could then transfer the storage space.
+2. **Transfer the ownership.** An administrator of the Retyc organization runs, for each storage space:
 
    ```sh
-   retyc admin dataroom chown <dataroom-id> <user-id>
+   retyc admin space chown <space-id> <user-id>
    ```
 
-3. **Delete the claims and PVs.** With `Retain` the dataroom stays in Retyc. Then delete the `RetycIdentity`
+3. **Delete the claims and PVs.** With `Retain` the storage space stays in Retyc. Then delete the `RetycIdentity`
    (`kubectl -n <ns> delete retycidentity default`): the enroller deletes the Secret at once when no PV uses it;
    otherwise it keeps it, and its sweep (at startup, then
    every hour) removes it once the last PV is gone.
@@ -385,14 +385,14 @@ cluster's for the other classes. A machine cannot be removed from Retyc while it
 
    ```sh
    retyc machine disable <machine-id>
-   retyc machine rm <machine-id>      # refused while the machine still owns datarooms
+   retyc machine rm <machine-id>      # refused while the machine still owns storage spaces
    ```
 
 **Do not disable the machine before step 1.** A disabled machine can no longer be used to add members, which blocks the
 transfer: enable it again for the time of step 1.
 
-To keep using a dataroom after recreating a `RetycIdentity`, a human administrator of that dataroom adds the new machine
-to it, then a static PV adopts the dataroom (see [Static PVs](#static-pvs)).
+To keep using a storage space after recreating a `RetycIdentity`, a human administrator of that storage space adds the new machine
+to it, then a static PV adopts the storage space (see [Static PVs](#static-pvs)).
 
 ## Uninstall
 
@@ -401,8 +401,8 @@ the
 CRD is kept (`helm.sh/resource-policy: keep`). Without an enroller, deleting a `RetycIdentity` or a tenant namespace
 stays `Terminating`. Remove the identities first:
 
-1. **Handle the datarooms to keep**:
-   see [Dataroom lifecycle and ownership transfer](#dataroom-lifecycle-and-ownership-transfer).
+1. **Handle the storage spaces to keep**:
+   see [Storage space lifecycle and ownership transfer](#storage-space-lifecycle-and-ownership-transfer).
 2. **Delete the PVCs and PVs.**
 3. **Delete the identities** and wait until they are gone (the enroller deletes the Secrets no PV references any more,
    then removes the finalizer; a Secret still referenced waits for the sweep, at startup then every hour, after its PVs
@@ -632,7 +632,7 @@ retycfs_token_expiry_seconds < 300                                    # access t
 
 Alert on `retycfs_ops_total{result!="ok"}`: it is what a pod sees as an I/O error.
 
-`/metrics` listens on the pod IPs without authentication: no file names, no dataroom content. On a cluster that
+`/metrics` listens on the pod IPs without authentication: no file names, no storage space content. On a cluster that
 restricts pod traffic, open ports `9808` and `9567` to Prometheus, and `9567` to the node plugin (it probes the mount
 pods' `/readyz`), e.g. with a NetworkPolicy in `extraObjects`.
 
@@ -643,7 +643,7 @@ The `ghcr.io/retyc/retyc-cli` release embedded in the controller image is pinned
 build against another release, or the development CLI (`make image-dev`, see [testing.md](testing.md)):
 
 ```sh
-make image RETYC_CLI_VERSION=v1.5.0-beta1
+make image RETYC_CLI_VERSION=v1.7.0-rc1
 make image RETYC_CLI_IMAGE=ghcr.io/retyc/retyc-cli-dev RETYC_CLI_VERSION=master
 ```
 

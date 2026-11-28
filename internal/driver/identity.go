@@ -1,7 +1,7 @@
 // Package driver implements the CSI Identity, Controller and Node gRPC services of the Retyc
-// CSI driver. Retyc datarooms, mounted through retycfs, back an RWX
+// CSI driver. Retyc storage spaces, mounted through retycfs, back an RWX
 // filesystem volume — see doc/architecture.md for the design and its trade-offs (no snapshot,
-// eventually-consistent shared filesystem). The capacity of a volume is the dataroom's storage
+// eventually-consistent shared filesystem). The capacity of a volume is the space's storage
 // reservation, enlarged by ControllerExpandVolume.
 package driver
 

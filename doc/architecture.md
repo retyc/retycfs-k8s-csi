@@ -2,14 +2,14 @@
 
 `retycfs-k8s-csi` is a filesystem CSI driver in the same family as `csi-driver-nfs` or `csi-driver-smb`: no
 attach/detach step, no block devices, one shared filesystem per volume mounted on every node that needs it. The
-filesystem is a Retyc dataroom, mounted with RetycFS, the filesystem built into `retyc-cli` (`retyc fs mount`). Each
+filesystem is a Retyc storage space, mounted with RetycFS, the filesystem built into `retyc-cli` (`retyc fs mount`). Each
 mount runs in its own pod, the **mount pod**, so that the node plugin holds no mount and can restart freely.
 
 ## Overview
 
 !["RetycFS Kubernetes overview"](../.media/retycfs_k8s_overview.png "RetycFS Kubernetes overview").
 
-- **Controller** (`--mode=controller`, one replica by default): creates a dataroom per `CreateVolume`, reserving the
+- **Controller** (`--mode=controller`, one replica by default): creates a storage space per `CreateVolume`, reserving the
   claim's size, deletes it on `DeleteVolume`, enlarges it on `ControllerExpandVolume` and applies a
   VolumeAttributesClass on `ControllerModifyVolume`.
 - **Node plugin** (`--mode=node`, one per node): starts a mount pod per staged volume, bind-mounts the staging path
@@ -36,10 +36,10 @@ team ships, embedded in the controller image (`COPY --from` the retyc-cli image)
 | `csi-resizer`                       | sidecar of the controller                                      | claim expansion and VolumeAttributesClass changes                                                                |
 | `retycfs-k8s-csi --mode=node`       | `DaemonSet`, privileged                                        | `NodeStageVolume`, `NodePublishVolume`, their inverses, `NodeGetVolumeStats`; manages the mount pods             |
 | `csi-node-driver-registrar`         | sidecar of the node plugin                                     | registers the driver socket with kubelet                                                                         |
-| mount pod `retycfs-mount-<hash>`    | `Pod` in the driver's namespace, pinned to its node            | `retyc fs mount` of one dataroom on kubelet's staging path                                                       |
+| mount pod `retycfs-mount-<hash>`    | `Pod` in the driver's namespace, pinned to its node            | `retyc fs mount` of one storage space on kubelet's staging path                                                  |
 | `retyc`                             | controller image, and image of the mount pods                  | every interaction with the Retyc API and all cryptography                                                        |
 
-The three modes are the same binary and the same image. The controller runs `retyc --json dataroom
+The three modes are the same binary and the same image. The controller runs `retyc --json space
 create|set|rm|ls` and `user quota` as short-lived subprocesses; the node plugin only talks to the Kubernetes API and
 to the mount pods' `/readyz`. The enroller talks to the Kubernetes API and runs `retyc machine enroll` and
 `retyc auth status`.
@@ -96,18 +96,18 @@ machine (annotation `csi.retycfs.com/machine-id`) checked at once, at most one c
 check), so that `Active` goes `False` within seconds rather than at the next 5-minute check. A machine disabled or deleted in Retyc fails the mounts with exit `77`; see
 [Backoff and give-up](#backoff-and-give-up).
 
-A dataroom belongs to the machine that created it, so an identity is also an owner: see
-[configuration.md](configuration.md#dataroom-lifecycle-and-ownership-transfer).
+A storage space belongs to the machine that created it, so an identity is also an owner: see
+[configuration.md](configuration.md#storage-space-lifecycle-and-ownership-transfer).
 
 ## Volume lifecycle
 
 1. **Provisioning.** A claim on a Retyc StorageClass makes `csi-provisioner` call `CreateVolume`. Before anything is
    created on the Retyc side, the controller reads the claim (`csi.storage.k8s.io/pvc/name` and `pvc/namespace`) and
    refuses it with `InvalidArgument` when its `csi.retycfs.com/uid` annotation is missing or invalid. It then reuses a
-   dataroom already titled after the volume (idempotency), or checks the account's quota and runs
-   `retyc dataroom create --title <pv-name> --storage-capacity <bytes> [--versioning=<bool>]`. The dataroom ID becomes
+   storage space already titled after the volume (idempotency), or checks the account's quota and runs
+   `retyc space create --title <pv-name> --storage-capacity <bytes> [--versioning=<bool>]`. The storage space ID becomes
    the volume handle; the volume context records `pvcName` and `pvcNamespace`. With a
-   `csi.retycfs.com/initial-members` annotation, the people it lists are then added to the dataroom, in the background
+   `csi.retycfs.com/initial-members` annotation, the people it lists are then added to the storage space, in the background
    and once: a failure is an event on the claim, not an error of the volume.
 2. **Capacity.** The reservation is the claim's request, with a floor of **20 GiB** imposed by the API: a smaller
    request is rounded up, as a block storage rounds up to its allocation unit, and the PV reports the size actually
@@ -123,11 +123,11 @@ A dataroom belongs to the machine that created it, so an identity is also an own
    `--drain-timeout`, 5 min by default), unmounts and exits. The call returns `Aborted` while the pod drains, then
    reads its exit code, removes the finalizer and unmounts whatever is left on the staging path.
 6. **Expansion.** Raising the claim's request makes `csi-resizer` call `ControllerExpandVolume`, i.e.
-   `retyc dataroom set --storage-capacity`; nothing is done on the node (`NodeExpansionRequired=false`). A
+   `retyc space set --storage-capacity`; nothing is done on the node (`NodeExpansionRequired=false`). A
    reservation that already covers the request is left alone, so a retry succeeds.
 7. **Deletion.** With `reclaimPolicy: Delete`, deleting the claim makes the provisioner call `DeleteVolume`, i.e.
-   `retyc dataroom rm retyc://<id> -y`. A dataroom already gone is a success. With `Retain`, the PV is released and the
-   dataroom kept; `examples/manifests/static-pv.yaml` shows how to adopt it again.
+   `retyc space rm retyc://<id> -y`. A storage space already gone is a success. With `Retain`, the PV is released and the
+   storage space kept; `examples/manifests/static-pv.yaml` shows how to adopt it again.
 
 ### Settings read at stage
 
@@ -143,7 +143,7 @@ is remounted, and `retycfs_csi_mount_pod_outdated` counts them.
 
 The only mutable parameter is `versioning` (`true` or `false`), from a VolumeAttributesClass (Kubernetes 1.34+). It is
 applied at creation (`mutable_parameters`) and whenever the claim's `volumeAttributesClassName` changes
-(`ControllerModifyVolume`, `retyc dataroom set --versioning=<bool> -y`). A class without `versioning` changes nothing;
+(`ControllerModifyVolume`, `retyc space set --versioning=<bool> -y`). A class without `versioning` changes nothing;
 an unknown key is refused. With versioning, every `close` of a written file stores a version. **Turning it off is
 destructive**: the driver confirms the CLI's prompt on the caller's behalf, and the next completed upload of each file
 deletes its older versions.
@@ -156,30 +156,27 @@ deletes its older versions.
 | claim not found                                                                                                                                                                                                       | `NotFound`           |
 | claim cannot be read (Kubernetes API)                                                                                                                                                                                 | `Unavailable`        |
 | `limit_bytes` below 20 GiB or below the request; reservation the API refuses to shrink (`capacity_shrink`) or below its minimum (`capacity_too_small`)                                                                | `OutOfRange`         |
-| account read-only, dataroom count reached, no storage left on the plan (`plan_exceeded`, `storage_exceeded`)                                                                                                          | `ResourceExhausted`  |
-| dataroom of the same name with an incompatible reservation                                                                                                                                                            | `AlreadyExists`      |
+| account read-only, storage space count reached, no storage left on the plan (`plan_exceeded`, `storage_exceeded`)                                                                                                     | `ResourceExhausted`  |
+| storage space of the same name with an incompatible reservation                                                                                                                                                       | `AlreadyExists`      |
 | no secrets and no default identity; identity incomplete; machine refused by Retyc (`auth_required`, `unauthenticated`: disabled or deleted); configuration refused (`config`); CLI refused as too old (`cli_too_old`) | `FailedPrecondition` |
 | identity enrolled but awaiting approval                                                                                                                                                                               | `Unavailable`        |
 | API answered 403 (`forbidden`)                                                                                                                                                                                        | `PermissionDenied`   |
 | API rate limit (`rate_limited`)                                                                                                                                                                                       | `Unavailable`        |
-| dataroom missing on expand or modify                                                                                                                                                                                  | `NotFound`           |
+| storage space missing on expand or modify                                                                                                                                                                             | `NotFound`           |
 | anything else from the CLI (`api_error`, `error`, an unknown kind)                                                                                                                                                    | `Internal`           |
 
 The provisioner and the resizer retry with their own backoff, and record the message as an event on the claim.
 
-The CLI's failures are told apart by the `kind` of the JSON error it prints on stderr under `--json` (retyc-cli
-v1.5.0-beta1 on: `{"error", "kind", "status", "code", "detail"}`, kinds in brackets above); `detail`, the API's wording,
-is only carried in the message. A machine refused is `FailedPrecondition` rather than `Unauthenticated`: in gRPC the
+The CLI's failures are told apart by the `kind` of the JSON error it prints on stderr under `--json`
+(`{"error", "kind", "status", "code", "detail"}`, kinds in brackets above); `detail`, the API's wording, is only
+carried in the message, and the driver never reads the text of an error. A machine refused is `FailedPrecondition` rather than `Unauthenticated`: in gRPC the
 latter says that the RPC's caller (the sidecar) is not authenticated, while here it is the identity of the secrets that
-the Retyc API refuses, and its reactivation (or a new machine) is what it waits for. An older CLI prints only
-`{"error": "..."}`: the driver
-then falls back to the text the CLI relays from the API (`API error 404:`, `API error 422:`, `Not enough storage left`,
-`can only be enlarged`, `must be at least N bytes`), and the login, configuration, 403, rate limit and version refusals
-stay `Internal`.
+the Retyc API refuses, and its reactivation (or a new machine) is what it waits for. The driver needs retyc-cli
+v1.7.0-rc1 or later (the `space` commands).
 
-`ControllerExpandVolume` reads the dataroom's reservation before `dataroom set`: the API accepts the current value
+`ControllerExpandVolume` reads the storage space's reservation before `space set`: the API accepts the current value
 without effect, but refuses a smaller one, and a reservation already at or above the request (enlarged elsewhere, or
-a reused dataroom) must succeed with its real size.
+a reused storage space) must succeed with its real size.
 
 ## Mount pods
 
@@ -204,7 +201,7 @@ that a restarted node plugin finds its pods again; labels `app.kubernetes.io/nam
   cache: about 4 KiB of the mount pod's memory per file or folder examined (`ls -l`, `stat`, `open`, a backup),
   2 KiB per entry only listed (`ls`, `find`). The kernel drops these entries when the node runs short of memory,
   never when only the mount pod reaches its limit: the mount pod is then killed (`137`, OOMKilled) and recreated.
-  Raise `csi.retycfs.com/mount-memory-limit` for a dataroom walked in full (an indexer, a backup). Overridable per
+  Raise `csi.retycfs.com/mount-memory-limit` for a storage space walked in full (an indexer, a backup). Overridable per
   claim (`csi.retycfs.com/mount-*` annotations).
 - **Spool**: `hostPath` `<mount.spoolDir>/<volume-id>` (`/var/lib/retycfs-csi/spool/<id>`), mode 0700, emptied by the
   node plugin before every creation: a killed process leaves its files there.
@@ -262,11 +259,11 @@ forever. The backoff lives in the node plugin's memory: a restart of the plugin 
 
 A pod that left no exit code (evicted, lost with its node) counts as `-1`.
 
-`75` comes with retyc-cli v1.5.0-beta1. An older CLI (a development image before it) exits `1` on lost writes as on any
-other error, with the same message (`N files being written were not sent before the filesystem was unmounted...`): an
-exit `1` whose output (the termination message) holds those words, or the drain's `abandoned (no drain timeout)` and
-`drain over after ...: ... not sent`, is read as lost writes. A newer CLI never exits `1` on lost writes, so the
-fallback holds for both; whether the pod was ever ready only changes the wording of `MountFailed`.
+The CLI exits `75` on lost writes, with two exceptions the driver reads in the output (the termination message): a
+login lost at the same time keeps `77`, and a drain that ran out before the cancelled uploads were counted exits `1`.
+On those two codes, the CLI's words (`N files being written were not sent before the filesystem was unmounted...`, the
+drain's `abandoned (no drain timeout)`, `drain over after ...: ... not sent` and `what they held is lost`) are read as
+lost writes. Whether the pod was ever ready only changes the wording of `MountFailed`.
 
 ## Recovery
 
@@ -329,7 +326,7 @@ writing when the process got `SIGTERM` is sent during the drain.
 ## High availability
 
 There is no active/standby pair and no failover between nodes: each node mounts the volumes its pods use, on its own,
-and every node mounting a `ReadWriteMany` claim reaches the same dataroom through the API. Scale out by running the
+and every node mounting a `ReadWriteMany` claim reaches the same storage space through the API. Scale out by running the
 consumers on more nodes.
 
 - **Node plugin restart** (upgrade, OOM kill, crash): no mount is cut, the mount pods hold them. Stages, publishes and
@@ -342,7 +339,7 @@ consumers on more nodes.
 
 ## The data path
 
-RetycFS mounts the dataroom by its ID, decrypting on read and encrypting on write with the account's AGE identity, in
+RetycFS mounts the storage space by its ID, decrypting on read and encrypting on write with the account's AGE identity, in
 the mount pod. The kernel enforces the permissions (`default_permissions`).
 
 ### Permissions
@@ -354,8 +351,8 @@ the mount pod. The kernel enforces the permissions (`default_permissions`).
     0755) but gets `Permission denied` on every write. The driver does nothing to check it beforehand.
 - The owner is set per volume and per node, not per pod: all the pods of a claim get the same owner.
 - `fsGroup` changes nothing: the driver declares `fsGroupPolicy: None` (a recursive `chown` would walk the whole
-  dataroom through the API, and is ignored anyway).
-- **Role of the identity**: a dataroom the identity only views (role *viewer*), or whose plan refuses writes, is
+  storage space through the API, and is ignored anyway).
+- **Role of the identity**: a storage space the identity only views (role *viewer*), or whose plan refuses writes, is
   mounted read-only. The role is read at mount time: after a role change, the volume must be remounted on each node
   (all its pods on the node gone, then back). `csi.retycfs.com/read-only` mounts read-only whatever the role.
 - **Role contributor**: a contributor cannot replace an existing file by `rename` (`EACCES`), so the "write a
@@ -382,7 +379,7 @@ the mount pod. The kernel enforces the permissions (`default_permissions`).
 
 The listing cache of the mount pods is `memory` by default: one per mount pod. With `cache.store: redis`, every mount
 pod of the cluster shares one Redis (the bundled CloudPirates subchart, standalone, or your own, 7.4 or later,
-standalone only), so that several nodes mounting the same dataroom fetch a folder once. Keys carry the dataroom ID:
+standalone only), so that several nodes mounting the same storage space fetch a folder once. Keys carry the storage space ID:
 volumes with different TTLs can share it. Without `cache.highConfidentiality`, Redis holds the **decrypted** file and
 folder names; with it, only the API's ciphertexts. A Redis that fails at start fails the mount (exit `1`); once mounted,
 a failing Redis falls back to a private memory cache.
@@ -433,15 +430,15 @@ PV's claim on another class. The driver still refuses an invalid claim at `Creat
 - **Metrics**: the mount pods serve `/metrics`, `/readyz` and `/healthz` on port 9567 of their pod IP, without
   authentication (numbers, operation names, no file names). Restrict ingress to Prometheus and the node plugin with a
   NetworkPolicy (`extraObjects` in the chart).
-- **Pod access**: isolation between workloads is at the claim level: one dataroom per team or application. Inside a
+- **Pod access**: isolation between workloads is at the claim level: one storage space per team or application. Inside a
   volume, pods running as the owner UID write, any other UID reads what the stored modes allow.
 
 ## Limitations
 
 - **No snapshots, no block volumes.**
-- **20 GiB minimum** per dataroom reservation: smaller claims are rounded up.
-- **`df` follows an expand within the cache TTL.** The dataroom is enlarged at once; a running mount caches the
-  dataroom's stats for the cache TTL (1 min by default, `csi.retycfs.com/cache-ttl`) before reporting the new size.
+- **20 GiB minimum** per storage space reservation: smaller claims are rounded up.
+- **`df` follows an expand within the cache TTL.** The storage space is enlarged at once; a running mount caches the
+  storage space's stats for the cache TTL (1 min by default, `csi.retycfs.com/cache-ttl`) before reporting the new size.
 - **Settings apply at the next mount** of the volume on a node: annotations, chart `mount.*` and `cache.*` values, the
   retyc-cli version, the role of the identity.
 - **The finalizer does not protect the mount from a drain.** `kubectl drain` evicts the mount pods like any other pod

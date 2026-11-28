@@ -363,8 +363,8 @@ func (p *pass) clearSecret(ctx context.Context, s *corev1.Secret) (string, error
 	switch {
 	case cluster && machine != "":
 		msg := fmt.Sprintf("The cluster-wide identity was recreated: Secret %s/%s of machine %s is replaced by a new "+
-			"enrollment. The existing datarooms belong to machine %s: once the new machine is approved, an "+
-			"administrator must add it to those datarooms (re-pairing), then disable or delete machine %s in "+
+			"enrollment. The existing storage spaces belong to machine %s: once the new machine is approved, "+
+			"an administrator must add it to those spaces (re-pairing), then disable or delete machine %s in "+
 			"Organization > Machines", s.Namespace, s.Name, machine, machine, machine)
 		e.Events.Event(p.obj, corev1.EventTypeWarning, ReasonClusterIdentityReplaced, msg)
 		klog.Warningf("enroller: %s/%s: %s", p.ri.Namespace, p.ri.Name, msg)

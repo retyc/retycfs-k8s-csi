@@ -1,6 +1,6 @@
-# Dataroom versioning through a VolumeAttributesClass (Kubernetes 1.34+): the driver applies its
+# Storage space versioning through a VolumeAttributesClass (Kubernetes 1.34+): the driver applies its
 # `versioning` parameter at creation and whenever the claim switches classes
-# (ControllerModifyVolume, `retyc dataroom set --versioning`). With versioning, every `close` of a
+# (ControllerModifyVolume, `retyc space set <space_id> --versioning=true|false`). With versioning, every `close` of a
 # written file keeps a version. Turning it off is destructive: the versions are dropped.
 apiVersion: storage.k8s.io/v1
 kind: VolumeAttributesClass
